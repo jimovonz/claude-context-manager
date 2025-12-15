@@ -23,6 +23,24 @@ from lib.common import (
 )
 
 
+def is_ccm_script(cmd: str) -> bool:
+    """Check if command runs our own CCM management scripts."""
+    ccm_patterns = [
+        r'claude-session-purge\.py',
+        r'claude-cache-prune\.py',
+        r'context-monitor\.py',
+        r'intercept-.*\.py',
+        r'learn-large-commands\.py',
+        r'pre-compact\.py',
+        r'~/.claude/hooks/',
+        r'\.claude/hooks/',
+    ]
+    for pattern in ccm_patterns:
+        if re.search(pattern, cmd):
+            return True
+    return False
+
+
 def is_obviously_small(cmd: str) -> bool:
     """Check if command is trivially small output."""
     # Compound commands need execution to measure
@@ -99,6 +117,12 @@ def main():
 
     # Allow subagents through
     allow_if_subagent(transcript_path, tool_use_id)
+
+    # CCM management scripts: always pass through
+    if is_ccm_script(cmd):
+        log_metric("Bash", "ccm-passthrough", 0)
+        json_pass()
+        return
 
     # Cache access blocking (simple string match - more reliable than regex)
     if '/.claude/cache/' in cmd or '/tmp/claude-tool-cache/' in cmd:
