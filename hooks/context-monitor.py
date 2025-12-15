@@ -10,6 +10,7 @@ Configuration: Edit config.py to adjust thresholds or disable.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -234,11 +235,45 @@ def main():
         message = f"{urgency}: Context at {int(pct)}% (~{tokens:,} tokens, {method}). {action}"
 
         # Write directly to terminal (Stop hook JSON output doesn't display)
+        tty_written = False
+        tty_path = None
+
+        # Try to find Claude's TTY by walking up process tree
         try:
-            with open('/dev/tty', 'w') as tty:
-                tty.write(f"\n\033[1;33m{message}\033[0m\n")
-        except:
-            pass
+            pid = os.getppid()
+            for _ in range(5):  # Walk up to 5 levels
+                fd1 = f'/proc/{pid}/fd/1'
+                if os.path.exists(fd1):
+                    target = os.readlink(fd1)
+                    if '/pts/' in target or '/dev/tty' in target:
+                        tty_path = target
+                        break
+                # Go to parent
+                stat = Path(f'/proc/{pid}/stat').read_text()
+                ppid = int(stat.split()[3])
+                if ppid <= 1:
+                    break
+                pid = ppid
+        except Exception as e:
+            debug_log(f"TTY search error: {e}")
+
+        if tty_path:
+            try:
+                with open(tty_path, 'w') as tty:
+                    tty.write(f"\n\033[1;33m{message}\033[0m\n")
+                    tty_written = True
+                debug_log(f"Wrote to TTY: {tty_path}")
+            except Exception as e:
+                debug_log(f"TTY write error: {e}")
+
+        # Fallback to /dev/tty
+        if not tty_written:
+            try:
+                with open('/dev/tty', 'w') as tty:
+                    tty.write(f"\n\033[1;33m{message}\033[0m\n")
+                debug_log("Wrote to /dev/tty")
+            except Exception as e:
+                debug_log(f"/dev/tty error: {e}")
 
         debug_log(f"Output warning: {message}")
     else:
