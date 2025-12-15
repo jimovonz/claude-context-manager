@@ -51,6 +51,8 @@ def is_obviously_interactive(cmd: str) -> bool:
         r'^(vim|vi|nano|emacs|less|more|man|top|htop|btop|watch)\s+',
         r'^(ssh|telnet|ftp|sftp)\s+',
         r'^(python|python3|node|ruby|irb|ghci)$',
+        # OAuth/device flow commands that wait for browser
+        r'^gh\s+auth\s+(login|refresh|status)',
     ]
 
     for pattern in interactive_patterns:
