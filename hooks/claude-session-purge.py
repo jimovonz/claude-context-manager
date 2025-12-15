@@ -1005,23 +1005,45 @@ Examples:
     if args.restart and not args.dry_run:
         import subprocess
 
-        # Find Claude PID
+        # Find Claude PID - must match CWD to ensure we get the right instance
         claude_pid = None
+        cwd = os.getcwd()
         try:
             result = subprocess.run(['pgrep', '-f', 'claude'], capture_output=True, text=True)
             pids = [int(p) for p in result.stdout.strip().split('\n') if p]
-            # Find the main Claude process (not this script's ancestors)
             my_pid = os.getpid()
+
             for pid in pids:
-                if pid != my_pid:
-                    # Check if it's actually claude binary
-                    try:
-                        exe = os.readlink(f'/proc/{pid}/exe')
-                        if 'claude' in exe or 'node' in exe:
-                            claude_pid = pid
-                            break
-                    except:
-                        pass
+                if pid == my_pid:
+                    continue
+                try:
+                    # Check if it's a claude binary (node-based)
+                    exe = os.readlink(f'/proc/{pid}/exe')
+                    if 'node' not in exe and 'claude' not in exe:
+                        continue
+
+                    # Check if CWD matches (this is our Claude instance)
+                    proc_cwd = os.readlink(f'/proc/{pid}/cwd')
+                    if proc_cwd == cwd:
+                        claude_pid = pid
+                        break
+                except:
+                    pass
+
+            # Fallback: if no CWD match, try to find by terminal
+            if not claude_pid:
+                my_tty = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else None
+                if my_tty:
+                    for pid in pids:
+                        if pid == my_pid:
+                            continue
+                        try:
+                            proc_tty = os.readlink(f'/proc/{pid}/fd/0')
+                            if proc_tty == my_tty:
+                                claude_pid = pid
+                                break
+                        except:
+                            pass
         except:
             pass
 

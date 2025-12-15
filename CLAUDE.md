@@ -23,6 +23,29 @@ Your options:
 2. **Paginate** - Use offset/limit on original Read call
 3. **Subagent for full content** - Subagent calls bypass interception
 
+## Working With CCM Stubs
+
+After `/purge`, old tool outputs become CCM stubs:
+```
+[CCM_CACHED]
+key: sha256:abc123...
+path: ~/.claude/cache/ccm/blobs/abc123.zst
+bytes: 45678
+lines: 1234
+exit: 0
+pinned: none
+[/CCM_CACHED]
+```
+
+To retrieve content from a stub:
+```bash
+~/.claude/hooks/ccm-get.py sha256:abc123...     # Full content
+~/.claude/hooks/ccm-get.py sha256:abc123 --info # Metadata only
+~/.claude/hooks/ccm-get.py --last               # Most recent cached item
+```
+
+Or use a Task agent to read and summarize the content.
+
 ## Subagent Behavior
 
 Main agent calls are intercepted; **subagent (Task) calls pass through unmodified**. This lets you delegate data-intensive work without context cost.
