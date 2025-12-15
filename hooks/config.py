@@ -76,3 +76,26 @@ COMPACT_INSTRUCTIONS = """Focus on preserving:
 
 Summarize completed work concisely. Prioritize actionable context over historical details.
 Maintain enough context to continue the current task without re-reading files."""
+
+# =============================================================================
+# CCM (Content Cache Manager) Settings
+# =============================================================================
+
+# Enable CCM durable cache (SHA256-based, compressed, with pinning)
+CCM_ENABLED = True
+
+# Compression method: 'auto' (zstd > gzip > none), 'zstd', 'gzip', or 'none'
+CCM_COMPRESSION = 'auto'
+
+# Default pin level for content cached via pin directives
+CCM_DEFAULT_PIN_LEVEL = 'soft'
+
+# Cache pruning defaults
+CCM_PRUNE_MAX_AGE_DAYS = 30      # Delete unpinned items older than this
+CCM_PRUNE_MAX_SIZE_MB = 500      # Max total cache size
+
+# Stub threshold: tool_results larger than this get stubbed during purge
+CCM_STUB_THRESHOLD_BYTES = 5000
+
+# Recent lines window: tool_results within this many lines of end are kept
+CCM_RECENT_LINES_WINDOW = 20

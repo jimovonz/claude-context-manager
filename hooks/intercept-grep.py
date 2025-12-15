@@ -162,6 +162,14 @@ def main():
     if cwd and not path_arg.startswith('/'):
         path_arg = str(Path(cwd) / path_arg)
 
+    # Expand ~ for path checking
+    check_path = str(Path(path_arg).expanduser()) if path_arg.startswith('~') else path_arg
+
+    # Block main agent from grepping cache directories
+    if '/.claude/cache/' in check_path or '/tmp/claude-tool-cache/' in check_path:
+        json_block("Cache directory - use Task agent to access.")
+        return
+
     # Execute
     output, exit_code = run_grep(input_data, path_arg)
     size = len(output)

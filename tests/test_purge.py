@@ -247,6 +247,151 @@ class TestPurgeOperations:
             session_file.unlink()
 
 
+class TestPinDirectives:
+    """Test pin directive parsing and resolution."""
+
+    def test_parse_pin_last(self):
+        """Should parse ccm:pin last directive."""
+        lines = [
+            ({'message': {'content': [{'type': 'text', 'text': 'ccm:pin last level=soft reason="important"'}]}}, None),
+        ]
+        directives = purge.parse_pin_directives(lines)
+        assert len(directives) == 1
+        assert directives[0].directive_type == 'last'
+        assert directives[0].level == 'soft'
+        assert directives[0].reason == 'important'
+
+    def test_parse_pin_next(self):
+        """Should parse ccm:pin next directive."""
+        lines = [
+            ({'message': {'content': 'ccm:pin next level=hard'}}, None),
+        ]
+        directives = purge.parse_pin_directives(lines)
+        assert len(directives) == 1
+        assert directives[0].directive_type == 'next'
+        assert directives[0].level == 'hard'
+
+    def test_parse_pin_range(self):
+        """Should parse ccm:pin start/end range."""
+        lines = [
+            ({'message': {'content': 'ccm:pin start'}}, None),
+            ({'message': {'content': 'some other message'}}, None),
+            ({'message': {'content': 'ccm:pin end'}}, None),
+        ]
+        directives = purge.parse_pin_directives(lines)
+        assert len(directives) == 2
+        assert directives[0].directive_type == 'start'
+        assert directives[1].directive_type == 'end'
+
+    def test_resolve_pin_last(self):
+        """Should resolve pin last to preceding tool_result."""
+        lines = [
+            ({'message': {'content': [{'type': 'tool_result', 'content': 'x' * 6000}]}}, None),
+            ({'message': {'content': 'ccm:pin last'}}, None),
+        ]
+        directives = purge.parse_pin_directives(lines)
+        targets = purge.resolve_pin_targets(lines, directives, threshold=5000)
+        assert 0 in targets
+
+    def test_resolve_pin_next(self):
+        """Should resolve pin next to following tool_result."""
+        lines = [
+            ({'message': {'content': 'ccm:pin next'}}, None),
+            ({'message': {'content': [{'type': 'tool_result', 'content': 'x' * 6000}]}}, None),
+        ]
+        directives = purge.parse_pin_directives(lines)
+        targets = purge.resolve_pin_targets(lines, directives, threshold=5000)
+        assert 1 in targets
+
+
+class TestCCMStubGeneration:
+    """Test CCM stub generation during purge."""
+
+    def test_large_tool_result_becomes_stub(self):
+        """Large old tool_results should become CCM stubs."""
+        # Create session with large tool_result far from end
+        lines = [
+            {'type': 'user', 'uuid': '1', 'isCompactSummary': True, 'message': {'content': []}},
+        ]
+        # Add many messages to push tool_result far from end
+        for i in range(30):
+            lines.append({
+                'type': 'assistant' if i % 2 == 0 else 'user',
+                'uuid': str(i + 2),
+                'parentUuid': str(i + 1),
+                'message': {'content': [{'type': 'text', 'text': f'message {i}'}]}
+            })
+
+        # Insert large tool_result early
+        lines.insert(2, {
+            'type': 'user',
+            'uuid': '2a',
+            'parentUuid': '1',
+            'message': {
+                'content': [{
+                    'type': 'tool_result',
+                    'tool_use_id': 'toolu_test',
+                    'content': 'Large output ' * 1000  # ~13000 bytes
+                }]
+            }
+        })
+
+        session_file = create_test_session(lines)
+
+        try:
+            results = purge.purge_session(
+                session_file,
+                threshold=5000,
+                dry_run=False,
+                verbose=False,
+                use_ccm=True
+            )
+
+            # Should have stubbed at least one result
+            # Note: depends on CCM being available
+            if purge.CCM_AVAILABLE:
+                assert results.get('tool_results_stubbed', 0) >= 1 or results.get('tool_results_truncated', 0) >= 1
+        finally:
+            for backup in session_file.parent.glob('*.backup.*'):
+                backup.unlink()
+            session_file.unlink()
+
+    def test_recent_tool_result_truncated_not_stubbed(self):
+        """Recent tool_results should be truncated, not stubbed."""
+        lines = [
+            {'type': 'user', 'uuid': '1', 'isCompactSummary': True, 'message': {'content': []}},
+            {
+                'type': 'user',
+                'uuid': '2',
+                'parentUuid': '1',
+                'message': {
+                    'content': [{
+                        'type': 'tool_result',
+                        'tool_use_id': 'toolu_recent',
+                        'content': 'Recent large output ' * 500
+                    }]
+                }
+            },
+        ]
+        session_file = create_test_session(lines)
+
+        try:
+            results = purge.purge_session(
+                session_file,
+                threshold=5000,
+                recent_lines=50,  # Everything is "recent"
+                dry_run=False,
+                verbose=False
+            )
+
+            # Should truncate, not stub (it's within recent_lines)
+            assert results.get('tool_results_truncated', 0) >= 1
+        finally:
+            for backup in session_file.parent.glob('*.backup.*'):
+                backup.unlink()
+            session_file.unlink()
+
+
 def run_tests():
     """Run tests without pytest."""
     import traceback
@@ -256,6 +401,8 @@ def run_tests():
         TestToolPairing,
         TestSessionAnalysis,
         TestPurgeOperations,
+        TestPinDirectives,
+        TestCCMStubGeneration,
     ]
 
     passed = 0

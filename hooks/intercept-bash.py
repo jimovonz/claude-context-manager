@@ -100,8 +100,8 @@ def main():
     # Allow subagents through
     allow_if_subagent(transcript_path, tool_use_id)
 
-    # Cache access blocking
-    if re.search(r'(/.claude/cache/|/tmp/claude-tool-cache/)', cmd):
+    # Cache access blocking (simple string match - more reliable than regex)
+    if '/.claude/cache/' in cmd or '/tmp/claude-tool-cache/' in cmd:
         # Allow listing/cleaning/stat commands
         if re.match(r'^(ls|rm|find|wc|stat|du|df|/bin/ls|/usr/bin/find|/bin/rm)(\s|$)', cmd):
             json_pass()

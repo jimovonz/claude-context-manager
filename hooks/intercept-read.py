@@ -43,20 +43,28 @@ def main():
     tool_input = input_data.get('tool_input', {})
     file_path = tool_input.get('file_path', '')
 
-    # Block main agent from reading Bash tool cache
-    if '/tmp/claude-tool-cache/' in file_path:
+    # Expand ~ first before any path resolution
+    if file_path.startswith('~'):
+        file_path = str(Path(file_path).expanduser())
+
+    # Resolve relative paths against cwd
+    if cwd and not file_path.startswith('/'):
+        file_path = str(Path(cwd) / file_path)
+
+    file_path = Path(file_path)
+
+    # Block main agent from reading cache files
+    file_path_str = str(file_path)
+    if '/tmp/claude-tool-cache/' in file_path_str:
+        json_block("Cache file - use Task agent to read.")
+        return
+    if '/.claude/cache/' in file_path_str:
         json_block("Cache file - use Task agent to read.")
         return
 
     # Extract remaining Read parameters
     offset = tool_input.get('offset')
     limit = tool_input.get('limit')
-
-    # Resolve relative paths against cwd
-    if cwd and not file_path.startswith('/'):
-        file_path = str(Path(cwd) / file_path)
-
-    file_path = Path(file_path).expanduser()
 
     # If offset/limit specified, user is already paginating - let it through
     if offset is not None or limit is not None:

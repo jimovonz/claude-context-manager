@@ -12,6 +12,7 @@ Structural requirements:
 """
 
 import json
+import re
 import sys
 import argparse
 import shutil
@@ -19,7 +20,27 @@ import uuid
 import os
 from pathlib import Path
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, NamedTuple
+
+sys.path.insert(0, str(Path(__file__).parent))
+
+# CCM integration
+try:
+    from lib.ccm_cache import (
+        init_ccm_cache, store_content, build_ccm_stub, get_metadata,
+        update_pin, is_ccm_stub
+    )
+    CCM_AVAILABLE = True
+except ImportError:
+    CCM_AVAILABLE = False
+
+
+class PinDirective(NamedTuple):
+    """Parsed pin directive from session."""
+    line_idx: int
+    directive_type: str  # 'last', 'next', 'start', 'end'
+    level: str  # 'soft', 'hard'
+    reason: str
 
 # Context budget defaults (tokens) - overridden if /context output found in session
 CONTEXT_MAX_TOKENS = 200000
@@ -274,6 +295,163 @@ def get_tool_result_ids(obj: dict) -> set:
     return ids
 
 
+# Pin directive regex: ccm:pin <type> [level=soft|hard] [reason="..."]
+PIN_DIRECTIVE_RE = re.compile(
+    r'ccm:pin\s+(last|next|start|end)(?:\s+level=(soft|hard))?(?:\s+reason="([^"]*)")?',
+    re.IGNORECASE
+)
+
+
+def parse_pin_directives(lines: list[tuple[Optional[dict], str]]) -> list[PinDirective]:
+    """
+    Parse pin directives from session messages.
+
+    Directives are embedded in user messages:
+        ccm:pin last [level=soft|hard] [reason="..."]
+        ccm:pin next [level=soft|hard] [reason="..."]
+        ccm:pin start [level=soft|hard] [reason="..."]
+        ccm:pin end
+
+    Returns list of PinDirective tuples.
+    """
+    directives = []
+
+    for i, (obj, _) in enumerate(lines):
+        if not obj:
+            continue
+
+        # Check message content for directives
+        msg = obj.get('message', {})
+        content = msg.get('content', [])
+
+        # Handle string content
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            # Concatenate text blocks
+            text = ' '.join(
+                block.get('text', '') if isinstance(block, dict) else str(block)
+                for block in content
+            )
+        else:
+            continue
+
+        # Find all directives in this message
+        for match in PIN_DIRECTIVE_RE.finditer(text):
+            directive_type = match.group(1).lower()
+            level = match.group(2) or 'soft'
+            reason = match.group(3) or ''
+
+            directives.append(PinDirective(
+                line_idx=i,
+                directive_type=directive_type,
+                level=level.lower(),
+                reason=reason
+            ))
+
+    return directives
+
+
+def resolve_pin_targets(
+    lines: list[tuple[Optional[dict], str]],
+    directives: list[PinDirective],
+    threshold: int = 5000
+) -> dict[int, PinDirective]:
+    """
+    Resolve pin directives to their target tool_result line indices.
+
+    Returns: dict mapping line_idx -> PinDirective for lines that should be pinned.
+    """
+    # Find all large tool_results with their positions
+    large_tool_results = []  # [(line_idx, block_idx, content_len), ...]
+
+    for i, (obj, _) in enumerate(lines):
+        if not obj:
+            continue
+        content = obj.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+
+        for j, block in enumerate(content):
+            if not isinstance(block, dict):
+                continue
+            if block.get('type') == 'tool_result':
+                result_content = block.get('content', '')
+                if isinstance(result_content, str) and len(result_content) > threshold:
+                    large_tool_results.append((i, j, len(result_content)))
+
+    # Resolve directives
+    pin_targets = {}  # line_idx -> PinDirective
+    in_range = None  # Active 'start' directive
+
+    for directive in directives:
+        if directive.directive_type == 'last':
+            # Find nearest preceding large tool_result
+            for line_idx, _, _ in reversed(large_tool_results):
+                if line_idx < directive.line_idx:
+                    pin_targets[line_idx] = directive
+                    break
+
+        elif directive.directive_type == 'next':
+            # Find next large tool_result after directive
+            for line_idx, _, _ in large_tool_results:
+                if line_idx > directive.line_idx:
+                    pin_targets[line_idx] = directive
+                    break
+
+        elif directive.directive_type == 'start':
+            in_range = directive
+
+        elif directive.directive_type == 'end':
+            if in_range:
+                # Pin all large tool_results between start and end
+                for line_idx, _, _ in large_tool_results:
+                    if in_range.line_idx < line_idx < directive.line_idx:
+                        pin_targets[line_idx] = in_range
+            in_range = None
+
+    return pin_targets
+
+
+def create_stub_for_tool_result(
+    block: dict,
+    content: str,
+    pin_level: str = 'none',
+    pin_reason: str = '',
+    tool_name: str = 'unknown',
+    exit_code: int = 0,
+    session_path: str = ''
+) -> str:
+    """
+    Cache tool_result content and return stub string.
+
+    Returns the CCM stub to replace the content with.
+    """
+    if not CCM_AVAILABLE:
+        # Fallback: simple truncation
+        return f"[CONTENT CACHED - {len(content)} bytes]\nCCM not available."
+
+    init_ccm_cache()
+
+    source = {
+        'tool_name': tool_name,
+        'exit_code': exit_code,
+        'session_path': session_path,
+    }
+
+    key = store_content(
+        content,
+        source=source,
+        pin_level=pin_level,
+        pin_reason=pin_reason
+    )
+
+    lines = content.count('\n')
+    stub = build_ccm_stub(key, len(content), lines, exit_code, pin_level)
+
+    return stub
+
+
 def analyze_session(filepath: Path, verbose: bool = False) -> dict:
     """Analyze session file and return statistics"""
     stats = {
@@ -491,17 +669,25 @@ def purge_session(
     verbose: bool = False,
     repair_only: bool = False,
     inject_compaction: bool = False,
+    recent_lines: int = 20,
+    default_pin_level: str = 'none',
+    use_ccm: bool = True,
 ) -> dict:
     """
     Purge session file of thinking blocks and large tool outputs.
+    Uses CCM to cache large outputs (stub-based, no data loss).
     Returns statistics about changes made.
     """
     results = {
         'thinking_removed': 0,
+        'tool_results_stubbed': 0,
         'tool_results_truncated': 0,
         'bytes_saved': 0,
+        'bytes_cached': 0,
         'parent_links_repaired': 0,
         'tool_pairs_repaired': 0,
+        'pin_directives_found': 0,
+        'pins_applied': 0,
         'synthetic_compaction_injected': False,
         'original_size': filepath.stat().st_size,
         'new_size': 0,
@@ -547,6 +733,17 @@ def purge_session(
     results['tool_pairs_repaired'] = repair_tool_pairing(lines, verbose)
     if verbose and results['tool_pairs_repaired']:
         print(f"  Repaired {results['tool_pairs_repaired']} orphaned blocks")
+
+    # Parse pin directives
+    pin_directives = parse_pin_directives(lines)
+    results['pin_directives_found'] = len(pin_directives)
+    if verbose and pin_directives:
+        print(f"Found {len(pin_directives)} pin directives")
+
+    # Resolve pin targets
+    pin_targets = resolve_pin_targets(lines, pin_directives, threshold)
+    if verbose and pin_targets:
+        print(f"Resolved {len(pin_targets)} pin targets")
 
     if not repair_only:
         # Process content
@@ -596,23 +793,64 @@ def purge_session(
                         original_len = len(result_content)
                         lines_from_end = len(lines) - i
 
-                        if lines_from_end > 20:
-                            # Old tool result (>20 lines back) - remove entirely
-                            results['tool_results_truncated'] += 1
-                            results['bytes_saved'] += original_len
-                            modified = True
-                            if verbose:
-                                print(f"  Line {i + 1}: Removing old tool_result ({original_len} bytes, {lines_from_end} lines back)")
-                            continue  # Skip adding to new_content
+                        # Determine pin level for this tool_result
+                        if i in pin_targets:
+                            pin_directive = pin_targets[i]
+                            pin_level = pin_directive.level
+                            pin_reason = pin_directive.reason
+                            results['pins_applied'] += 1
                         else:
-                            # Recent tool result - truncate but keep
+                            pin_level = default_pin_level
+                            pin_reason = ''
+
+                        if lines_from_end > recent_lines:
+                            # Old tool result - cache to CCM and replace with stub
+                            if use_ccm and CCM_AVAILABLE:
+                                # Extract tool info if available
+                                tool_name = 'unknown'
+                                exit_code = 0
+                                # Try to parse exit code from content
+                                if 'exit ' in result_content[:100].lower():
+                                    import re as _re
+                                    exit_match = _re.search(r'exit[:\s]+(\d+)', result_content[:100], _re.I)
+                                    if exit_match:
+                                        exit_code = int(exit_match.group(1))
+
+                                stub = create_stub_for_tool_result(
+                                    block,
+                                    result_content,
+                                    pin_level=pin_level,
+                                    pin_reason=pin_reason,
+                                    tool_name=tool_name,
+                                    exit_code=exit_code,
+                                    session_path=str(filepath)
+                                )
+                                block['content'] = stub
+                                results['tool_results_stubbed'] += 1
+                                results['bytes_cached'] += original_len
+                                results['bytes_saved'] += original_len - len(stub)
+                                modified = True
+                                if verbose:
+                                    pin_info = f", pin={pin_level}" if pin_level != 'none' else ""
+                                    print(f"  Line {i + 1}: Stubbed tool_result ({original_len} bytes{pin_info})")
+                            else:
+                                # Fallback: simple truncation (legacy behavior)
+                                truncated = result_content[:500] + f"\n\n[TRUNCATED - original: {original_len} bytes]"
+                                block['content'] = truncated
+                                results['tool_results_truncated'] += 1
+                                results['bytes_saved'] += original_len - len(truncated)
+                                modified = True
+                                if verbose:
+                                    print(f"  Line {i + 1}: Truncating old tool_result ({original_len} -> {len(truncated)} bytes)")
+                        else:
+                            # Recent tool result - truncate but keep (preserve recent context)
                             truncated = result_content[:500] + f"\n\n[TRUNCATED - original: {original_len} bytes]"
                             block['content'] = truncated
                             results['tool_results_truncated'] += 1
                             results['bytes_saved'] += original_len - len(truncated)
                             modified = True
                             if verbose:
-                                print(f"  Line {i + 1}: Truncating tool_result ({original_len} -> {len(truncated)} bytes)")
+                                print(f"  Line {i + 1}: Truncating recent tool_result ({original_len} -> {len(truncated)} bytes)")
 
                 new_content.append(block)
 
@@ -667,6 +905,12 @@ Examples:
     parser.add_argument('--keep-thinking', action='store_true', help="Don't remove thinking blocks")
     parser.add_argument('--no-inject-compaction', action='store_true',
                         help='Disable automatic synthetic compaction injection (by default, sessions without compaction get one injected to enable full purging)')
+    parser.add_argument('--recent-lines', type=int, default=20,
+                        help='Keep recent tool_results within this many lines of end (default: 20)')
+    parser.add_argument('--pin-level-default', choices=['none', 'soft', 'hard'], default='none',
+                        help='Default pin level for cached content (default: none)')
+    parser.add_argument('--no-ccm', action='store_true',
+                        help='Disable CCM caching (use legacy truncation)')
     parser.add_argument('--dry-run', action='store_true', help='Report changes without writing')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed progress')
     parser.add_argument('--restart', '-r', action='store_true',
@@ -727,6 +971,9 @@ Examples:
         verbose=args.verbose,
         repair_only=args.repair_only,
         inject_compaction=not args.no_inject_compaction,
+        recent_lines=args.recent_lines,
+        default_pin_level=args.pin_level_default,
+        use_ccm=not args.no_ccm,
     )
 
     print()
@@ -734,8 +981,13 @@ Examples:
     if results.get('synthetic_compaction_injected'):
         print("Synthetic compaction: INJECTED (enables full purging)")
     if not args.repair_only:
-        print(f"Thinking blocks emptied: {results['thinking_removed']}")
-        print(f"Tool results truncated: {results['tool_results_truncated']}")
+        print(f"Thinking blocks removed: {results['thinking_removed']}")
+        if results.get('tool_results_stubbed', 0) > 0:
+            print(f"Tool results stubbed (CCM): {results['tool_results_stubbed']} ({results.get('bytes_cached', 0):,} bytes cached)")
+        if results.get('tool_results_truncated', 0) > 0:
+            print(f"Tool results truncated: {results['tool_results_truncated']}")
+        if results.get('pins_applied', 0) > 0:
+            print(f"Pin directives applied: {results['pins_applied']}")
     print(f"Parent links repaired: {results['parent_links_repaired']}")
     print(f"Tool pairs repaired: {results['tool_pairs_repaired']}")
     print()

@@ -171,6 +171,117 @@ When context reaches critical levels, run `/purge` to reduce session file size:
 
 **Important:** Creates automatic backup before modifying (`*.backup.YYYYMMDD_HHMMSS`)
 
+## CCM (Content Cache Manager)
+
+CCM provides durable, content-addressable caching with deduplication and pinning support. Large tool outputs are cached using SHA256 keys, enabling safe purging without data loss.
+
+### How It Works
+
+Instead of deleting large tool_results during purge, CCM:
+1. Hashes content to generate a unique SHA256 key
+2. Compresses and stores content in `~/.claude/cache/ccm/blobs/`
+3. Replaces original content with a compact stub reference
+4. Preserves tool_use/tool_result pairing (structural integrity)
+
+### Stub Format
+
+When tool_results are stubbed, they look like:
+```
+[CCM_CACHED]
+key: sha256:abc123...
+path: ~/.claude/cache/ccm/blobs/abc123.zst
+bytes: 45678
+lines: 1523
+exit: 0
+pinned: soft
+[/CCM_CACHED]
+```
+
+The original content can be retrieved via Task agent or cache prune tool.
+
+### Pin Directives
+
+Mark important outputs for preservation using pin directives in your messages:
+
+```
+ccm:pin last level=soft reason="important build output"
+ccm:pin next level=hard
+ccm:pin start level=soft
+... (all large outputs in range are pinned)
+ccm:pin end
+```
+
+**Pin levels:**
+- `none` - Pruned first by age/size
+- `soft` - Pruned only after all unpinned content exhausted
+- `hard` - Never auto-pruned
+
+**Slash commands:**
+- `/pin-last` - Pin the most recent large tool output
+- `/pin-next` - Pin the next large tool output
+- `/pin-start` - Start a pin range
+- `/pin-end` - End the current pin range
+
+### Cache Prune Tool
+
+Manage the CCM cache with the prune tool:
+
+```bash
+# Show cache statistics
+~/.claude/hooks/claude-cache-prune.py --stats
+
+# Prune entries older than 30 days
+~/.claude/hooks/claude-cache-prune.py --max-age-days 30
+
+# Keep cache under 500MB
+~/.claude/hooks/claude-cache-prune.py --max-size-mb 500
+
+# Remove orphaned entries (not referenced by any session)
+~/.claude/hooks/claude-cache-prune.py --gc-unreferenced
+
+# Pin a specific key
+~/.claude/hooks/claude-cache-prune.py --pin sha256:abc... --level hard --reason "important"
+
+# List all pinned entries
+~/.claude/hooks/claude-cache-prune.py --list-pins
+```
+
+### CCM Configuration
+
+In `config.py`:
+```python
+CCM_ENABLED = True              # Enable CCM durable cache
+CCM_COMPRESSION = 'auto'        # 'auto', 'zstd', 'gzip', or 'none'
+CCM_DEFAULT_PIN_LEVEL = 'soft'  # Default pin level for cached content
+CCM_PRUNE_MAX_AGE_DAYS = 30     # Delete unpinned items older than this
+CCM_PRUNE_MAX_SIZE_MB = 500     # Max total cache size
+CCM_STUB_THRESHOLD_BYTES = 5000 # tool_results larger than this get stubbed
+CCM_RECENT_LINES_WINDOW = 20    # Keep recent tool_results (not stubbed)
+```
+
+### Storage Layout
+
+```
+~/.claude/cache/ccm/
+├── blobs/           # Compressed content files
+│   ├── abc123.zst   # zstd compressed (if available)
+│   └── def456.gz    # gzip fallback
+├── meta/            # Metadata sidecars
+│   ├── abc123.json  # Pin status, source info, timestamps
+│   └── def456.json
+├── index.jsonl      # Append-only audit log
+└── last_key         # Most recent cache key (for pin last)
+```
+
+### Privacy Note
+
+The CCM cache contains tool outputs from your sessions. This may include:
+- Command outputs (file listings, build logs)
+- File contents (code, configs)
+- Search results
+
+The cache is stored locally in `~/.claude/cache/ccm/` with restricted permissions (700). Use `--gc-unreferenced` to clean up orphaned entries, or delete the entire directory to clear all cached content.
+
 ## Troubleshooting
 
 ### Bypass hooks temporarily

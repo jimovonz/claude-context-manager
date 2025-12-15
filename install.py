@@ -177,6 +177,15 @@ def install():
         py_file.chmod(0o755)
     print()
 
+    # Create CCM cache directory structure
+    print("Initializing CCM cache...")
+    ccm_dir = CLAUDE_DIR / 'cache' / 'ccm'
+    (ccm_dir / 'blobs').mkdir(parents=True, exist_ok=True)
+    (ccm_dir / 'meta').mkdir(parents=True, exist_ok=True)
+    print("  ~/.claude/cache/ccm/blobs/")
+    print("  ~/.claude/cache/ccm/meta/")
+    print()
+
     # Update settings.json
     print("Configuring settings.json...")
     if SETTINGS_FILE.exists():

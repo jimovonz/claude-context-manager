@@ -27,13 +27,21 @@ READ_THRESHOLD = 25000
 PATTERNS_EXPIRY_DAYS = 30
 METRICS_ENABLED = False
 
+# CCM defaults
+CCM_ENABLED = True
+CCM_COMPRESSION = 'auto'
+CCM_DEFAULT_PIN_LEVEL = 'soft'
+CCM_STUB_THRESHOLD_BYTES = 5000
+
 # Load config if exists
 if CONFIG_FILE.exists():
     _config = {}
     exec(CONFIG_FILE.read_text(), _config)
     for _key in ['CACHE_DIR', 'CACHE_MAX_AGE_MINUTES', 'BASH_THRESHOLD',
                  'GLOB_THRESHOLD', 'GREP_THRESHOLD', 'READ_THRESHOLD',
-                 'PATTERNS_EXPIRY_DAYS', 'METRICS_ENABLED']:
+                 'PATTERNS_EXPIRY_DAYS', 'METRICS_ENABLED',
+                 'CCM_ENABLED', 'CCM_COMPRESSION', 'CCM_DEFAULT_PIN_LEVEL',
+                 'CCM_STUB_THRESHOLD_BYTES']:
         if _key in _config:
             globals()[_key] = _config[_key]
 
@@ -98,11 +106,82 @@ def allow_if_subagent(transcript_path: str, tool_use_id: str) -> None:
 
 
 def cache_output(content: str) -> str:
-    """Cache content to file, return UUID."""
+    """Cache content to file, return UUID (legacy format)."""
     file_uuid = uuid.uuid4().hex[:8]
     cache_file = CACHE_DIR / file_uuid
     cache_file.write_text(content)
     return file_uuid
+
+
+def cache_output_ccm(
+    content: str,
+    tool_name: str = 'unknown',
+    exit_code: int = 0,
+    command: str = '',
+    cwd: str = '',
+    session_path: str = '',
+    pin_level: str = 'none',
+    pin_reason: str = ''
+) -> str:
+    """
+    Cache content using CCM durable storage.
+
+    Returns cache key (sha256:...) if CCM enabled, else legacy UUID.
+    """
+    if not CCM_ENABLED:
+        return cache_output(content)
+
+    try:
+        from lib.ccm_cache import init_ccm_cache, store_content
+
+        init_ccm_cache(CACHE_DIR)
+
+        source = {
+            'tool_name': tool_name,
+            'exit_code': exit_code,
+            'command': command,
+            'cwd': cwd,
+            'session_path': session_path,
+        }
+
+        key = store_content(
+            content,
+            source=source,
+            pin_level=pin_level,
+            pin_reason=pin_reason
+        )
+        return key
+    except ImportError:
+        # Fallback to legacy cache
+        return cache_output(content)
+
+
+def build_ccm_cache_response(
+    key: str,
+    lines: int,
+    size: int,
+    exit_code: int,
+    original: str
+) -> str:
+    """Build cache response message with CCM stub format."""
+    if key.startswith('sha256:'):
+        # CCM format
+        try:
+            from lib.ccm_cache import build_ccm_stub, get_metadata
+
+            meta = get_metadata(key)
+            pin_level = meta.get('pinned', {}).get('level', 'none') if meta else 'none'
+
+            stub = build_ccm_stub(key, size, lines, exit_code, pin_level)
+            return f"""{stub}
+Original: {original}
+
+Options: Task agent (summarize or full content), or paginate with offset/limit."""
+        except ImportError:
+            pass
+
+    # Fallback to legacy format
+    return build_cache_response(key, lines, size, exit_code, original)
 
 
 def json_block(reason: str) -> None:
