@@ -790,6 +790,13 @@ Examples:
             print()
             print(f"Auto-restart in {args.restart_delay}s (PID {claude_pid})...")
 
+            # Get TTY for output
+            tty = ''
+            try:
+                tty = os.ttyname(sys.stdout.fileno())
+            except:
+                tty = '/dev/tty'
+
             subprocess.Popen([
                 sys.executable, str(restart_script),
                 '--pid', str(claude_pid),
@@ -797,6 +804,7 @@ Examples:
                 '--delay', str(args.restart_delay),
                 '--session', session_id,
                 '--original-args', original_args,
+                '--tty', tty,
             ], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             print()

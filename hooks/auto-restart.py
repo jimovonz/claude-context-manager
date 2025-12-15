@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Auto-restart Claude after purge. Spawned as background process.
-Waits, kills Claude, injects resume command via X11.
+Waits, kills Claude, copies resume command to clipboard.
 """
 
 import os
@@ -9,9 +9,8 @@ import sys
 import time
 import signal
 import subprocess
+import shutil
 from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent / 'lib'))
 
 DELAY_SECONDS = 3
 
@@ -52,27 +51,62 @@ def get_session_id(cwd: str) -> str:
 
 def build_resume_cmd(original_args: list[str], session_id: str) -> str:
     """Build resume command preserving original flags."""
-    # Start with claude
     cmd_parts = ['claude']
 
     # Preserve flags from original command (skip 'claude' itself and any --resume/--continue)
     skip_next = False
-    for arg in original_args[1:]:  # Skip first element (claude binary path)
+    for arg in original_args[1:]:
         if skip_next:
             skip_next = False
             continue
         if arg in ('--resume', '--continue', '-c'):
-            skip_next = arg == '--resume'  # --resume takes a value
+            skip_next = arg == '--resume'
             continue
         if arg.startswith('--resume='):
             continue
         cmd_parts.append(arg)
 
-    # Add resume with session
     cmd_parts.append('--resume')
     cmd_parts.append(session_id)
 
     return ' '.join(cmd_parts)
+
+
+def copy_to_clipboard(text: str) -> bool:
+    """Copy text to clipboard. Returns True on success."""
+    # Try wl-copy first (Wayland native)
+    if shutil.which('wl-copy'):
+        try:
+            subprocess.run(['wl-copy', text], check=True)
+            return True
+        except:
+            pass
+
+    # Try xclip
+    if shutil.which('xclip'):
+        try:
+            subprocess.run(['xclip', '-selection', 'clipboard'],
+                         input=text.encode(), check=True)
+            return True
+        except:
+            pass
+
+    # Try xsel
+    if shutil.which('xsel'):
+        try:
+            subprocess.run(['xsel', '--clipboard', '--input'],
+                         input=text.encode(), check=True)
+            return True
+        except:
+            pass
+
+    return False
+
+
+def get_tty() -> str:
+    """Get the TTY of the Claude process."""
+    # Will be passed as argument, but fallback to current
+    return os.ttyname(sys.stdout.fileno()) if sys.stdout.isatty() else '/dev/tty'
 
 
 def main():
@@ -83,9 +117,10 @@ def main():
     parser.add_argument('--delay', type=int, default=DELAY_SECONDS)
     parser.add_argument('--session', help='Session ID to resume')
     parser.add_argument('--original-args', help='Original claude command line (colon-separated)')
+    parser.add_argument('--tty', help='TTY to write message to')
     args = parser.parse_args()
 
-    # Detach from parent
+    # Detach from parent (double fork)
     if os.fork() > 0:
         sys.exit(0)
     os.setsid()
@@ -104,29 +139,36 @@ def main():
 
     # Build resume command
     session_id = args.session or get_session_id(args.cwd)
-    if session_id:
-        cmd = build_resume_cmd(original_args, session_id)
-    else:
-        cmd = "claude --continue"
+    if not session_id:
+        sys.exit(1)
+
+    resume_cmd = build_resume_cmd(original_args, session_id)
 
     # Kill Claude
     try:
         os.kill(args.pid, signal.SIGTERM)
-        time.sleep(0.5)  # Let it exit gracefully
+        time.sleep(0.5)
     except ProcessLookupError:
-        pass  # Already dead
+        pass
 
-    # Small delay for terminal to be ready
-    time.sleep(0.3)
-
-    # Type resume command
+    # Make sure it's dead
     try:
-        from x11_type import type_string
-        type_string(cmd + '\n', delay=0.008)
-    except Exception as e:
-        # Fallback: print to stderr (won't be visible but logged)
-        print(f"Auto-restart failed: {e}", file=sys.stderr)
-        sys.exit(1)
+        os.kill(args.pid, signal.SIGKILL)
+        time.sleep(0.3)
+    except ProcessLookupError:
+        pass
+
+    # Copy to clipboard and notify
+    tty = args.tty or '/dev/tty'
+    try:
+        with open(tty, 'w') as f:
+            if copy_to_clipboard(resume_cmd):
+                f.write(f"\n\033[1;32mResume command copied to clipboard.\033[0m\n")
+                f.write(f"Press \033[1mCtrl+Shift+V\033[0m then \033[1mEnter\033[0m\n\n")
+            else:
+                f.write(f"\n\033[1;33mRun:\033[0m {resume_cmd}\n\n")
+    except:
+        pass
 
 
 if __name__ == '__main__':
