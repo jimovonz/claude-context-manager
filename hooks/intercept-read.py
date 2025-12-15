@@ -5,16 +5,15 @@ Small files and paginated reads pass through to Claude.
 """
 
 import re
-import shutil
 import sys
-import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
-    allow_if_subagent, json_block, json_pass, log_metric, CACHE_DIR, READ_THRESHOLD
+    allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
+    log_metric, READ_THRESHOLD
 )
 
 # File patterns that should never be intercepted (full content required)
@@ -94,19 +93,22 @@ def main():
         return
 
     # Large file - cache it and return reference
-    file_uuid = uuid.uuid4().hex[:8]
-    cache_file = CACHE_DIR / file_uuid
-    shutil.copy2(file_path, cache_file)
+    try:
+        content = file_path.read_text()
+    except Exception as e:
+        json_block(f"Error reading file: {e}")
+        return
 
-    lines = sum(1 for _ in open(cache_file))
+    lines = content.count('\n')
+    cache_key = cache_output_ccm(
+        content,
+        tool_name='Read',
+        exit_code=0,
+        command=str(file_path)
+    )
     log_metric("Read", "cached", file_size)
 
-    reason = f"""Cached ({lines} lines, {file_size} bytes).
-File: ~/.claude/cache/{file_uuid}
-Original: {file_path}
-
-Options: Task agent (summarize or full content), or paginate with offset/limit."""
-
+    reason = build_ccm_cache_response(cache_key, lines, file_size, 0, str(file_path))
     json_block(reason)
 
 

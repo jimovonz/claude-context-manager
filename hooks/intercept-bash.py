@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
-    allow_if_subagent, json_block, json_pass, cache_output, build_cache_response,
+    allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
     log_metric, run_command, probe_command, get_command_classification,
     is_cached_interactive, learn_command_classification,
     BASH_THRESHOLD, CACHE_DIR
@@ -152,10 +152,16 @@ def main():
         reason = f"Exit {exit_code}:\n\n{output}"
         json_block(reason)
     else:
-        file_uuid = cache_output(output)
         lines = output.count('\n')
+        cache_key = cache_output_ccm(
+            output,
+            tool_name='Bash',
+            exit_code=exit_code,
+            command=cmd,
+            cwd=cwd
+        )
         log_metric("Bash", "cached", size)
-        reason = build_cache_response(file_uuid, lines, size, exit_code, cmd)
+        reason = build_ccm_cache_response(cache_key, lines, size, exit_code, cmd)
         json_block(reason)
 
 
