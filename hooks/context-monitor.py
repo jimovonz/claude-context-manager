@@ -1,17 +1,40 @@
 #!/usr/bin/env python3
 """
-Context monitor - warns at each 10% increment.
+Context monitor - warns when context usage crosses configured thresholds.
 Runs on UserPromptSubmit, injects warning into context.
+
+Configuration: Edit config.py to adjust thresholds or disable.
 """
 
 import json
 import sys
 from pathlib import Path
 
-# Config
-MAX_TOKENS = 200000
-WARNING_INCREMENT = 10  # Warn at each 10% increment
-CHARS_PER_TOKEN = 4  # Rough estimate
+# Load configuration
+HOOKS_DIR = Path(__file__).parent
+sys.path.insert(0, str(HOOKS_DIR))
+
+# Defaults (overridden by config.py if present)
+CONTEXT_MONITOR_ENABLED = True
+CONTEXT_MAX_TOKENS = 200000
+CONTEXT_WARN_THRESHOLDS = [50, 70, 80, 90]
+CONTEXT_CHARS_PER_TOKEN = 4
+CONTEXT_OVERHEAD_TOKENS = 19500
+
+# Load from config
+CONFIG_FILE = HOOKS_DIR / 'config.py'
+if CONFIG_FILE.exists():
+    _config = {}
+    try:
+        exec(CONFIG_FILE.read_text(), _config)
+        for key in ['CONTEXT_MONITOR_ENABLED', 'CONTEXT_MAX_TOKENS',
+                    'CONTEXT_WARN_THRESHOLDS', 'CONTEXT_CHARS_PER_TOKEN',
+                    'CONTEXT_OVERHEAD_TOKENS']:
+            if key in _config:
+                globals()[key] = _config[key]
+    except Exception:
+        pass  # Use defaults on config error
+
 
 def find_last_compaction(lines):
     """Find index of last compaction summary."""
@@ -20,6 +43,7 @@ def find_last_compaction(lines):
         if '"isCompactSummary":true' in line or '"isCompactSummary": true' in line:
             return i
     return 0
+
 
 def extract_content_chars(content):
     """Extract character count from message content (string or list of blocks)."""
@@ -36,31 +60,24 @@ def extract_content_chars(content):
         elif isinstance(block, dict):
             block_type = block.get('type', '')
 
-            # Text blocks
             if block_type == 'text':
                 total += len(block.get('text', ''))
-
-            # Tool use - count name and input
             elif block_type == 'tool_use':
                 total += len(block.get('name', ''))
                 inp = block.get('input', {})
                 if isinstance(inp, dict):
-                    # Serialize input to approximate token count
                     total += len(json.dumps(inp, separators=(',', ':')))
-
-            # Tool result - count content
             elif block_type == 'tool_result':
                 result = block.get('content', '')
                 if isinstance(result, str):
                     total += len(result)
                 elif isinstance(result, list):
                     total += extract_content_chars(result)
-
-            # Thinking blocks (only counted for current turn, but estimate anyway)
             elif block_type == 'thinking':
                 total += len(block.get('thinking', ''))
 
     return total
+
 
 def estimate_context(session_path):
     """Estimate current context usage as percentage."""
@@ -68,11 +85,9 @@ def estimate_context(session_path):
         with open(session_path) as f:
             lines = f.readlines()
 
-        # Only count content after last compaction
         last_compact = find_last_compaction(lines)
         recent_lines = lines[last_compact:]
 
-        # Extract ONLY message.role and message.content - nothing else
         content_chars = 0
         for line in recent_lines:
             try:
@@ -80,39 +95,38 @@ def estimate_context(session_path):
                 msg = obj.get('message', {})
                 if not msg:
                     continue
-
-                # Count role (small but part of payload)
                 content_chars += len(msg.get('role', ''))
-
-                # Count content
                 content_chars += extract_content_chars(msg.get('content', ''))
             except:
                 pass
 
-        # ~4 chars per token (Claude's tokenizer is similar to GPT)
-        estimated_tokens = content_chars / 4
+        estimated_tokens = content_chars / CONTEXT_CHARS_PER_TOKEN
+        estimated_tokens += CONTEXT_OVERHEAD_TOKENS
 
-        # Known overhead from /context: system prompt (3k) + tools (15.2k) + memory (1.3k) = 19.5k
-        estimated_tokens += 19500
-
-        return min(100, (estimated_tokens / MAX_TOKENS) * 100)
+        return min(100, (estimated_tokens / CONTEXT_MAX_TOKENS) * 100)
     except:
         return 0
 
-def get_warning_level(pct):
-    """Get current warning level (0, 10, 20, ... 90)."""
-    return int(pct // WARNING_INCREMENT) * WARNING_INCREMENT
+
+def get_crossed_threshold(pct, last_threshold):
+    """Find highest threshold crossed that's above last warning."""
+    for threshold in sorted(CONTEXT_WARN_THRESHOLDS, reverse=True):
+        if pct >= threshold > last_threshold:
+            return threshold
+    return None
+
 
 def get_last_warning(state_file):
-    """Get last warning level from state file."""
+    """Get last warning threshold from state file."""
     try:
         with open(state_file) as f:
             return int(f.read().strip())
     except:
         return 0
 
+
 def set_last_warning(state_file, level):
-    """Save last warning level."""
+    """Save last warning threshold."""
     try:
         state_file.parent.mkdir(parents=True, exist_ok=True)
         with open(state_file, 'w') as f:
@@ -120,44 +134,53 @@ def set_last_warning(state_file, level):
     except:
         pass
 
+
 def main():
+    # Check if enabled
+    if not CONTEXT_MONITOR_ENABLED:
+        return
+
     input_data = json.load(sys.stdin)
-    session_path = input_data.get('session_id', '')
     transcript_path = input_data.get('transcript_path', '')
 
     if not transcript_path:
-        print('{}')
         return
 
-    # Use transcript path to derive state file
     session_id = Path(transcript_path).stem
     state_file = Path.home() / '.claude' / 'state' / f'{session_id}-context-level'
 
-    # Estimate current context
     pct = estimate_context(transcript_path)
-    current_level = get_warning_level(pct)
-    last_level = get_last_warning(state_file)
+    last_threshold = get_last_warning(state_file)
+    crossed = get_crossed_threshold(pct, last_threshold)
 
-    # Only warn if we've crossed a new threshold
-    if current_level > last_level and current_level >= 50:
-        set_last_warning(state_file, current_level)
+    if crossed:
+        set_last_warning(state_file, crossed)
 
-        if current_level >= 80:
+        # Determine urgency based on threshold
+        max_threshold = max(CONTEXT_WARN_THRESHOLDS)
+        high_threshold = sorted(CONTEXT_WARN_THRESHOLDS)[-2] if len(CONTEXT_WARN_THRESHOLDS) > 1 else max_threshold
+
+        if crossed >= max_threshold:
             urgency = "⚠️ CRITICAL"
             action = "Run /purge NOW or compaction is imminent!"
-        elif current_level >= 70:
+        elif crossed >= high_threshold:
             urgency = "⚠️ WARNING"
             action = "Consider running /purge soon."
         else:
             urgency = "📊 NOTE"
             action = "/purge available if needed."
 
-        warning = f"{urgency}: Context at ~{int(pct)}%. {action}"
-        print(warning)
+        print(f"{urgency}: Context at ~{int(pct)}%. {action}")
     else:
-        # Update state even if no warning (tracks decreases after purge)
-        if current_level != last_level:
-            set_last_warning(state_file, current_level)
+        # Track decreases (e.g., after purge) to reset warning state
+        current_max_crossed = 0
+        for threshold in CONTEXT_WARN_THRESHOLDS:
+            if pct >= threshold:
+                current_max_crossed = threshold
+
+        if current_max_crossed < last_threshold:
+            set_last_warning(state_file, current_max_crossed)
+
 
 if __name__ == '__main__':
     main()

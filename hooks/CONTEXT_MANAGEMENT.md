@@ -109,6 +109,43 @@ PATTERNS_EXPIRY_DAYS = 30       # Learned patterns retention
 METRICS_ENABLED = False         # Enable metrics logging
 ```
 
+## Context Monitor
+
+The context monitor estimates usage and warns at configurable thresholds.
+
+### Configuration
+
+In `config.py`:
+```python
+CONTEXT_MONITOR_ENABLED = True              # Set False to disable
+CONTEXT_MAX_TOKENS = 200000                 # Claude's context window
+CONTEXT_WARN_THRESHOLDS = [50, 70, 80, 90]  # Warn at these percentages
+CONTEXT_CHARS_PER_TOKEN = 4                 # Estimation ratio
+CONTEXT_OVERHEAD_TOKENS = 19500             # System prompt + tools overhead
+```
+
+### Accuracy Limitations
+
+The estimation is approximate:
+
+| Factor | Impact | Notes |
+|--------|--------|-------|
+| Char/token ratio | ±20% | Code ~3 chars/token, prose ~4-5 |
+| Overhead | ±5k tokens | Varies with enabled tools, MCP servers |
+| Images/PDFs | Not counted | Binary content uses tokens but isn't measured |
+| Thinking blocks | Overcounted | Only current turn's thinking is actually in context |
+
+**The estimate is intentionally conservative** - better to warn early than miss compaction. For precise measurement, use Claude Code's `/context` command.
+
+### Why Not Use a Real Tokenizer?
+
+Adding `tiktoken` or similar would:
+- Add a dependency (~10MB)
+- Still not match Claude's exact tokenizer
+- Slow down every prompt submission
+
+The char-based estimate is fast and good enough for early warning.
+
 ## The `/purge` Command
 
 When context reaches critical levels, run `/purge` to reduce session file size:
