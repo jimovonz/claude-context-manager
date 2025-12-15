@@ -21,6 +21,17 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
+# Context budget (tokens) - adjust if using MCP servers or custom tools
+CONTEXT_MAX_TOKENS = 200000
+CONTEXT_SYSTEM_PROMPT = 3100
+CONTEXT_SYSTEM_TOOLS = 15100
+CONTEXT_MEMORY_FILES = 1000  # ~860-1k typical
+CONTEXT_AUTOCOMPACT_BUFFER = 45000
+CONTEXT_MESSAGE_SPACE = (CONTEXT_MAX_TOKENS - CONTEXT_SYSTEM_PROMPT -
+                         CONTEXT_SYSTEM_TOOLS - CONTEXT_MEMORY_FILES -
+                         CONTEXT_AUTOCOMPACT_BUFFER)  # ~136k
+BYTES_PER_TOKEN = 4  # rough estimate for mixed content
+
 
 def find_current_session(cwd: Optional[str] = None) -> Optional[Path]:
     """
@@ -683,11 +694,13 @@ Examples:
     print(f"Parent links repaired: {results['parent_links_repaired']}")
     print(f"Tool pairs repaired: {results['tool_pairs_repaired']}")
     print()
-    print(f"Original size: {results['original_size']:,} bytes")
-    print(f"New size: {results['new_size']:,} bytes")
-    saved = results['original_size'] - results['new_size']
-    pct = (saved / results['original_size'] * 100) if results['original_size'] > 0 else 0
-    print(f"Saved: {saved:,} bytes ({pct:.1f}%)")
+
+    saved_bytes = results['original_size'] - results['new_size']
+    saved_tokens = saved_bytes // BYTES_PER_TOKEN
+    pct_of_message_space = (saved_tokens / CONTEXT_MESSAGE_SPACE * 100)
+
+    print(f"Saved: ~{saved_tokens:,} tokens ({pct_of_message_space:.0f}% of message space)")
+    print(f"       {saved_bytes:,} bytes")
 
 
 if __name__ == '__main__':
