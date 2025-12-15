@@ -21,8 +21,8 @@ sys.path.insert(0, str(HOOKS_DIR))
 CONTEXT_MONITOR_ENABLED = True
 CONTEXT_MAX_TOKENS = 200000
 CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
-CONTEXT_CHARS_PER_TOKEN = 4  # Fallback when tiktoken unavailable
-CONTEXT_OVERHEAD_TOKENS = 19500
+CONTEXT_CHARS_PER_TOKEN = 2.5  # Fallback when tiktoken unavailable (empirically ~2.4)
+CONTEXT_OVERHEAD_TOKENS = 45000  # Visible (~20k) + hidden Claude overhead (~25k)
 
 # Load from config
 CONFIG_FILE = HOOKS_DIR / 'config.py'
@@ -58,11 +58,28 @@ def count_tokens(text: str) -> int:
 
 
 def find_last_compaction(lines):
-    """Find index of last compaction summary."""
+    """Find index of last compaction summary.
+
+    Must check actual JSON structure, not just string presence,
+    because tool_results may contain the string 'isCompactSummary'.
+    """
     for i in range(len(lines) - 1, -1, -1):
         line = lines[i]
-        if '"isCompactSummary":true' in line or '"isCompactSummary": true' in line:
-            return i
+        # Quick string check first for performance
+        if 'isCompactSummary' not in line:
+            continue
+        try:
+            obj = json.loads(line)
+            # Check top-level isCompactSummary
+            if obj.get('isCompactSummary') is True:
+                return i
+            # Check content[0].isCompactSummary (alternate format)
+            content = obj.get('message', {}).get('content', [])
+            if isinstance(content, list) and content:
+                if isinstance(content[0], dict) and content[0].get('isCompactSummary') is True:
+                    return i
+        except (json.JSONDecodeError, KeyError, TypeError):
+            continue
     return 0
 
 
@@ -95,10 +112,8 @@ def extract_content_text(content) -> str:
                 elif isinstance(result, list):
                     parts.append(extract_content_text(result))
             elif block_type == 'thinking':
-                # Note: thinking blocks are NOT in context for subsequent turns
-                # Only the current turn's thinking is counted by Claude
-                # We skip them to avoid overestimation
-                pass
+                # Thinking blocks ARE in context after compaction
+                parts.append(block.get('thinking', ''))
 
     return '\n'.join(parts)
 
@@ -110,7 +125,8 @@ def estimate_context(session_path) -> tuple[float, int]:
             lines = f.readlines()
 
         last_compact = find_last_compaction(lines)
-        recent_lines = lines[last_compact:]
+        # Include the compaction summary itself (it's part of context)
+        recent_lines = lines[last_compact:] if last_compact > 0 else lines
 
         all_text = []
         for line in recent_lines:
