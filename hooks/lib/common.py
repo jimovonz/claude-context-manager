@@ -195,7 +195,14 @@ def classify_with_haiku(cmd: str, pattern: str) -> Optional[dict]:
     prompt = f'''Classify this Linux command. Reply ONLY with JSON, no other text.
 {{"interactive": 0 or 1, "large_output": 0 or 1}}
 
-interactive=1 if command may prompt for user input (passwords, confirmations, OAuth, Y/n prompts)
+interactive=1 if command may EVER prompt for user input at ANY point during execution, including:
+- OAuth/authentication flows (browser opens, device codes)
+- Password or passphrase prompts
+- Confirmation prompts (Y/n, yes/no, Continue?)
+- Interactive installers or setup wizards
+- Commands that wait for user input before proceeding
+- Deployment confirmations at the end of builds
+
 large_output=1 if command typically produces more than 50 lines of output
 
 Command: {cmd}
@@ -320,13 +327,26 @@ def learn_command_classification(cmd: str, interactive: bool = False, large_outp
         save_command_cache(cache)
 
 
+# Patterns that indicate interactive prompt in output
+INTERACTIVE_OUTPUT_PATTERNS = [
+    r'\[Y/n\]', r'\[y/N\]', r'\[yes/no\]',
+    r'Continue\?', r'Proceed\?', r'Are you sure',
+    r'Enter password', r'Enter passphrase', r'Password:',
+    r'one-time code', r'Press Enter', r'Press any key',
+    r'Login with', r'Waiting for .* input',
+    r'Do you want to', r'Would you like to',
+]
+import re as _re
+_INTERACTIVE_OUTPUT_RE = _re.compile('|'.join(INTERACTIVE_OUTPUT_PATTERNS), _re.IGNORECASE)
+
+
 def probe_command(cmd: str, cwd: Optional[str] = None,
                   full_timeout: int = 120) -> Tuple[Optional[str], int, bool]:
     """
-    Run command with stdin closed to detect interactive commands.
+    Run command with stdin closed and continuous monitoring for interactive patterns.
 
     Returns (output, exit_code, is_interactive).
-    If is_interactive=True, the command was killed and pattern learned.
+    If is_interactive=True, the command was killed and should be passed through.
     """
     import select
 
@@ -347,56 +367,63 @@ def probe_command(cmd: str, cwd: Optional[str] = None,
 
     output_chunks = []
     start_time = datetime.now()
+    last_output_time = start_time
+
+    def check_for_interactive(text: str) -> bool:
+        """Check if output contains interactive patterns."""
+        return bool(_INTERACTIVE_OUTPUT_RE.search(text))
 
     try:
-        # Probe phase: wait briefly to see if command completes or hangs
-        while (datetime.now() - start_time).total_seconds() < PROBE_TIMEOUT:
+        # Main execution loop with continuous monitoring
+        while True:
+            elapsed = (datetime.now() - start_time).total_seconds()
+
+            # Check if process finished
             ret = proc.poll()
             if ret is not None:
-                # Command completed during probe - not interactive
                 stdout, stderr = proc.communicate(timeout=1)
                 output_chunks.append(stdout)
                 output_chunks.append(stderr)
                 return ''.join(output_chunks), ret, False
 
             # Read available output
+            new_output = False
             if hasattr(select, 'select'):
-                readable, _, _ = select.select([proc.stdout, proc.stderr], [], [], 0.1)
+                readable, _, _ = select.select([proc.stdout, proc.stderr], [], [], 0.5)
                 for stream in readable:
                     chunk = stream.read(4096) if stream else ''
                     if chunk:
                         output_chunks.append(chunk)
+                        new_output = True
+                        last_output_time = datetime.now()
 
-        # Command still running after probe timeout
-        # Check if it produced any output (slow but working) vs hung (interactive)
-        partial = ''.join(output_chunks)
+                        # Check new output for interactive patterns
+                        if check_for_interactive(chunk):
+                            proc.terminate()
+                            try:
+                                proc.wait(timeout=1)
+                            except subprocess.TimeoutExpired:
+                                proc.kill()
+                            return ''.join(output_chunks), -1, True
 
-        # If no output after 2 seconds with stdin closed, likely interactive
-        if len(partial.strip()) < 50:
-            # Learn this pattern
-            pattern = extract_command_pattern(cmd)
-            if pattern:
-                save_interactive_pattern(pattern)
-
-            # Kill and signal interactive
-            proc.terminate()
-            try:
-                proc.wait(timeout=1)
-            except subprocess.TimeoutExpired:
+            # Timeout checks
+            if elapsed >= full_timeout:
                 proc.kill()
-            return partial, -1, True
+                proc.communicate()
+                return ''.join(output_chunks) + "\nCommand timed out", 124, False
 
-        # Has output, continue waiting (slow command)
-        remaining = full_timeout - PROBE_TIMEOUT
-        try:
-            stdout, stderr = proc.communicate(timeout=remaining)
-            output_chunks.append(stdout)
-            output_chunks.append(stderr)
-            return ''.join(output_chunks), proc.returncode, False
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.communicate()
-            return ''.join(output_chunks) + "\nCommand timed out", 124, False
+            # If no output for PROBE_TIMEOUT seconds early in execution, likely hung
+            time_since_output = (datetime.now() - last_output_time).total_seconds()
+            if elapsed < 10 and time_since_output >= PROBE_TIMEOUT:
+                partial = ''.join(output_chunks)
+                if len(partial.strip()) < 50:
+                    # No meaningful output, likely waiting for input
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return partial, -1, True
 
     except Exception as e:
         try:
