@@ -231,7 +231,14 @@ def main():
 
         # Show tokens and estimation method
         method = "tiktoken" if _using_tiktoken else "estimated"
-        print(f"{urgency}: Context at {int(pct)}% (~{tokens:,} tokens, {method}). {action}")
+        message = f"{urgency}: Context at {int(pct)}% (~{tokens:,} tokens, {method}). {action}"
+
+        # Output JSON with systemMessage to display to user
+        output = {
+            "systemMessage": message
+        }
+        print(json.dumps(output))
+        debug_log(f"Output warning: {message}")
     else:
         # Track decreases (e.g., after purge) to reset warning state
         current_max_crossed = 0
