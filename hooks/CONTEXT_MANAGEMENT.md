@@ -218,7 +218,7 @@ alias c='claude --dangerously-skip-permissions'
 ### Configuration via setup.sh
 
 ```bash
-COMPACT_PCT=0.5 source ~/.claude/setup.sh  # Custom compact threshold
+COMPACT_PCT=70 source ~/.claude/setup.sh   # Custom compact threshold (percent)
 SKIP_PERMISSIONS=false source ~/.claude/setup.sh  # Disable skip-permissions
 ```
 
@@ -231,21 +231,21 @@ Control when automatic compaction triggers via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`
 In `config.py`:
 ```python
 AUTOCOMPACT_ENABLED = True   # Enable threshold override
-AUTOCOMPACT_THRESHOLD = 0.6  # Trigger at 60% context (0.0-1.0)
+AUTOCOMPACT_THRESHOLD = 80   # Trigger at 80% context (percent)
 ```
 
 The threshold is set in `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "0.6"
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "80"
   }
 }
 ```
 
 ### Why Control Compaction?
 
-The default compaction threshold is often too aggressive. By setting it to 60%, you:
+The default compaction threshold is often too aggressive. By setting it to 80%, you:
 - Get more context utilization before compaction kicks in
 - Maintain longer reasoning chains
 - Allow the context monitor to warn you before compaction

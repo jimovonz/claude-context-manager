@@ -16,8 +16,8 @@ HOOKS_DIR = CLAUDE_DIR / 'hooks'
 COMMANDS_DIR = CLAUDE_DIR / 'commands'
 SETTINGS_FILE = CLAUDE_DIR / 'settings.json'
 
-# Default autocompact threshold (can be changed in config.py)
-DEFAULT_AUTOCOMPACT_THRESHOLD = "0.6"
+# Default autocompact threshold in percent (can be changed in config.py)
+DEFAULT_AUTOCOMPACT_THRESHOLD = "80"
 
 # Hook configurations to merge into settings.json
 HOOK_CONFIG = {

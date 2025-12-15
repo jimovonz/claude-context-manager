@@ -53,9 +53,8 @@ CONTEXT_OVERHEAD_TOKENS = 19500  # System prompt + tools + memory
 # Enable auto-compact threshold override (set via CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env var)
 AUTOCOMPACT_ENABLED = True
 
-# Default threshold (0.0-1.0): triggers compaction at this % of max context
-# 0.6 = 60% of context window triggers compaction
-AUTOCOMPACT_THRESHOLD = 0.6
+# Default threshold (percent): triggers compaction at this % of max context
+AUTOCOMPACT_THRESHOLD = 80
 
 # =============================================================================
 # Pre-Compact Hook Settings

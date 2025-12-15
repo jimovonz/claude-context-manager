@@ -128,7 +128,7 @@ When context is critical, run `/purge` to:
 
 ### Auto-Compaction Control
 
-Compaction triggers at 60% context by default (configurable). This is set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in settings.json.
+Compaction triggers at 80% context by default (configurable). This is set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in settings.json.
 
 ### Custom Compaction Instructions
 
@@ -154,7 +154,7 @@ READ_THRESHOLD = 25000
 
 # Auto-compaction
 AUTOCOMPACT_ENABLED = True
-AUTOCOMPACT_THRESHOLD = 0.6  # 60% of context
+AUTOCOMPACT_THRESHOLD = 80   # percent of context
 
 # Pre-compact hook
 PRE_COMPACT_ENABLED = True

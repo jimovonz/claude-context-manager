@@ -12,7 +12,7 @@
 #   alias c='claude --dangerously-skip-permissions'
 
 # Configuration (can be overridden before sourcing)
-: "${COMPACT_PCT:=0.6}"                    # Auto-compact threshold (0.0-1.0)
+: "${COMPACT_PCT:=80}"                     # Auto-compact threshold (percent)
 : "${SKIP_PERMISSIONS:=true}"              # Enable --dangerously-skip-permissions
 
 # Set environment variables
