@@ -31,6 +31,26 @@ Hooks activate on your next Claude Code session.
 python3 uninstall.py
 ```
 
+## Quick Disable/Enable
+
+If hooks cause issues, quickly disable without uninstalling:
+
+```bash
+python3 disable.py   # Disable all hooks (keeps files)
+python3 enable.py    # Re-enable hooks
+```
+
+Or use environment variable for a single session:
+```bash
+CLAUDE_HOOKS_PASSTHROUGH=1 claude
+```
+
+## Surviving Claude Code Updates
+
+**Your hooks will survive Claude Code updates.** The `~/.claude/` directory is user configuration space - Claude Code updates only touch the application in `~/.local/share/claude/` (native) or `node_modules/` (npm).
+
+However, if Claude Code changes its hook API in a breaking way, hooks may need updating. Check the repository for compatibility updates after major Claude Code releases.
+
 ## What Gets Installed
 
 ```
