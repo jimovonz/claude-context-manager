@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""
+Claude Context Manager - Uninstaller
+
+Removes hooks and commands, cleans up settings.json.
+"""
+
+import json
+import shutil
+import sys
+from pathlib import Path
+
+CLAUDE_DIR = Path.home() / '.claude'
+HOOKS_DIR = CLAUDE_DIR / 'hooks'
+COMMANDS_DIR = CLAUDE_DIR / 'commands'
+SETTINGS_FILE = CLAUDE_DIR / 'settings.json'
+
+# Files installed by this package
+HOOK_FILES = [
+    'config.py',
+    'context-monitor.py',
+    'intercept-bash.py',
+    'intercept-glob.py',
+    'intercept-grep.py',
+    'intercept-read.py',
+    'learn-large-commands.py',
+    'review-learned-commands.py',
+    'claude-session-purge.py',
+    'CONTEXT_MANAGEMENT.md',
+    'lib/__init__.py',
+    'lib/common.py',
+]
+
+COMMAND_FILES = [
+    'purge.md',
+]
+
+# Hook matchers to remove from settings.json
+HOOK_MATCHERS = {
+    'UserPromptSubmit': [''],
+    'PreToolUse': ['Bash', 'Glob', 'Grep', 'Read'],
+    'PostToolUse': ['Bash'],
+}
+
+
+def remove_files(base_dir: Path, files: list, description: str) -> int:
+    """Remove listed files, return count removed."""
+    count = 0
+    for rel_path in files:
+        file_path = base_dir / rel_path
+        if file_path.exists():
+            file_path.unlink()
+            print(f"  Removed: {rel_path}")
+            count += 1
+
+    # Clean up empty directories
+    for rel_path in files:
+        dir_path = (base_dir / rel_path).parent
+        if dir_path != base_dir and dir_path.exists():
+            try:
+                dir_path.rmdir()  # Only removes if empty
+                print(f"  Removed empty dir: {dir_path.relative_to(base_dir)}")
+            except OSError:
+                pass  # Directory not empty
+
+    return count
+
+
+def clean_settings():
+    """Remove our hooks from settings.json."""
+    if not SETTINGS_FILE.exists():
+        return
+
+    try:
+        settings = json.loads(SETTINGS_FILE.read_text())
+    except json.JSONDecodeError:
+        print("  Warning: settings.json is invalid, skipping")
+        return
+
+    hooks = settings.get('hooks', {})
+    modified = False
+
+    for event, matchers in HOOK_MATCHERS.items():
+        if event not in hooks:
+            continue
+
+        original_len = len(hooks[event])
+        hooks[event] = [
+            h for h in hooks[event]
+            if not (isinstance(h, dict) and h.get('matcher') in matchers and
+                    any('~/.claude/hooks/' in str(hook.get('command', ''))
+                        for hook in h.get('hooks', [])))
+        ]
+
+        if len(hooks[event]) < original_len:
+            modified = True
+            print(f"  Removed {event} hooks")
+
+        # Remove empty event arrays
+        if not hooks[event]:
+            del hooks[event]
+
+    # Remove empty hooks object
+    if not hooks and 'hooks' in settings:
+        del settings['hooks']
+
+    if modified:
+        SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
+
+
+def uninstall():
+    """Uninstall hooks and commands."""
+    print("Claude Context Manager - Uninstalling\n")
+
+    # Remove hook files
+    if HOOKS_DIR.exists():
+        print("Removing hooks:")
+        count = remove_files(HOOKS_DIR, HOOK_FILES, "hooks")
+        if count == 0:
+            print("  No hook files found")
+        print()
+
+    # Remove command files
+    if COMMANDS_DIR.exists():
+        print("Removing commands:")
+        count = remove_files(COMMANDS_DIR, COMMAND_FILES, "commands")
+        if count == 0:
+            print("  No command files found")
+        print()
+
+    # Clean settings.json
+    print("Cleaning settings.json:")
+    clean_settings()
+    print()
+
+    # Note about cache and state
+    cache_dir = CLAUDE_DIR / 'cache'
+    state_dir = CLAUDE_DIR / 'state'
+    patterns_file = CLAUDE_DIR / 'learned-patterns.txt'
+
+    remaining = []
+    if cache_dir.exists() and any(cache_dir.iterdir()):
+        remaining.append(f"  {cache_dir}/ (cached outputs)")
+    if state_dir.exists() and any(state_dir.iterdir()):
+        remaining.append(f"  {state_dir}/ (context monitor state)")
+    if patterns_file.exists():
+        remaining.append(f"  {patterns_file} (learned patterns)")
+
+    if remaining:
+        print("Optional cleanup (data files, not removed automatically):")
+        for item in remaining:
+            print(item)
+        print()
+
+    print("=" * 50)
+    print("Uninstallation complete!")
+
+
+def main():
+    if len(sys.argv) > 1 and sys.argv[1] in ('-h', '--help'):
+        print(__doc__)
+        print("Usage: python3 uninstall.py")
+        sys.exit(0)
+
+    uninstall()
+
+
+if __name__ == '__main__':
+    main()
