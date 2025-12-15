@@ -233,11 +233,13 @@ def main():
         method = "tiktoken" if _using_tiktoken else "estimated"
         message = f"{urgency}: Context at {int(pct)}% (~{tokens:,} tokens, {method}). {action}"
 
-        # Output JSON with systemMessage to display to user
-        output = {
-            "systemMessage": message
-        }
-        print(json.dumps(output))
+        # Write directly to terminal (Stop hook JSON output doesn't display)
+        try:
+            with open('/dev/tty', 'w') as tty:
+                tty.write(f"\n\033[1;33m{message}\033[0m\n")
+        except:
+            pass
+
         debug_log(f"Output warning: {message}")
     else:
         # Track decreases (e.g., after purge) to reset warning state
