@@ -161,6 +161,17 @@ def set_last_warning(state_file, level):
         pass
 
 
+def debug_log(msg):
+    """Write debug message to log file."""
+    log_file = Path.home() / '.claude' / 'context-monitor.log'
+    try:
+        with open(log_file, 'a') as f:
+            from datetime import datetime
+            f.write(f"{datetime.now().isoformat()} {msg}\n")
+    except:
+        pass
+
+
 def main():
     if not CONTEXT_MONITOR_ENABLED:
         return
@@ -168,7 +179,10 @@ def main():
     input_data = json.load(sys.stdin)
     transcript_path = input_data.get('transcript_path', '')
 
+    debug_log(f"Called with transcript_path={transcript_path}")
+
     if not transcript_path:
+        debug_log("No transcript_path, returning")
         return
 
     session_id = Path(transcript_path).stem
@@ -177,6 +191,8 @@ def main():
     pct, tokens = estimate_context(transcript_path)
     last_threshold = get_last_warning(state_file)
     crossed = get_crossed_threshold(pct, last_threshold)
+
+    debug_log(f"pct={pct:.1f}% tokens={tokens} last_threshold={last_threshold} crossed={crossed}")
 
     if crossed:
         set_last_warning(state_file, crossed)

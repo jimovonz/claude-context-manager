@@ -44,7 +44,7 @@ Main Agent                          Subagent (Task)
 | `intercept-grep.py` | PreToolUse:Grep | Run ripgrep, cache large results |
 | `intercept-read.py` | PreToolUse:Read | Cache large files, whitelist configs |
 | `learn-large-commands.py` | PostToolUse:Bash | Learn patterns from large outputs |
-| `context-monitor.py` | UserPromptSubmit | Monitor context usage |
+| `context-monitor.py` | Stop | Monitor context usage after each response |
 | `pre-compact.py` | PreCompact | Inject custom compaction instructions |
 
 ## Working With This System

@@ -25,9 +25,8 @@ HOOK_CONFIG = {
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD
     },
     "hooks": {
-        "UserPromptSubmit": [
+        "Stop": [
             {
-                "matcher": "",
                 "hooks": [{"type": "command", "command": "~/.claude/hooks/context-monitor.py"}]
             }
         ],
