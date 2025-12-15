@@ -679,7 +679,7 @@ def purge_session(
     Returns statistics about changes made.
     """
     results = {
-        'thinking_removed': 0,
+        'thinking_emptied': 0,
         'tool_results_stubbed': 0,
         'tool_results_truncated': 0,
         'bytes_saved': 0,
@@ -774,16 +774,27 @@ def purge_session(
 
                 block_type = block.get('type')
 
-                # Remove thinking blocks entirely (skip adding to new_content)
+                # Empty thinking blocks (keep structure, clear content)
+                # Claude requires thinking blocks to exist at start of assistant messages
                 if block_type == 'thinking' and not keep_thinking:
                     thinking_len = len(block.get('thinking', ''))
-                    if thinking_len > 20:  # Only if there's meaningful content to clear
-                        results['thinking_removed'] += 1
+                    lines_from_end = len(lines) - i
+
+                    # Keep recent thinking blocks intact
+                    if lines_from_end <= recent_lines:
+                        new_content.append(block)
+                        continue
+
+                    # For older thinking: empty but preserve block structure
+                    if thinking_len > 20:
+                        results['thinking_emptied'] += 1
                         results['bytes_saved'] += thinking_len
                         modified = True
                         if verbose:
-                            print(f"  Line {i + 1}: Removing thinking block ({thinking_len} bytes)")
-                    # Don't append block to new_content - removes it entirely
+                            print(f"  Line {i + 1}: Emptying thinking block ({thinking_len} bytes)")
+                        # Empty the thinking but keep the block
+                        block['thinking'] = ''
+                    new_content.append(block)
                     continue
 
                 # Handle large tool_results based on position
@@ -981,7 +992,7 @@ Examples:
     if results.get('synthetic_compaction_injected'):
         print("Synthetic compaction: INJECTED (enables full purging)")
     if not args.repair_only:
-        print(f"Thinking blocks removed: {results['thinking_removed']}")
+        print(f"Thinking blocks emptied: {results['thinking_emptied']}")
         if results.get('tool_results_stubbed', 0) > 0:
             print(f"Tool results stubbed (CCM): {results['tool_results_stubbed']} ({results.get('bytes_cached', 0):,} bytes cached)")
         if results.get('tool_results_truncated', 0) > 0:
