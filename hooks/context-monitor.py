@@ -3,6 +3,9 @@
 Context monitor - warns when context usage crosses configured thresholds.
 Runs on UserPromptSubmit, injects warning into context.
 
+Uses tiktoken for accurate token counting when available (pip install tiktoken),
+falls back to char-based estimation otherwise.
+
 Configuration: Edit config.py to adjust thresholds or disable.
 """
 
@@ -17,8 +20,8 @@ sys.path.insert(0, str(HOOKS_DIR))
 # Defaults (overridden by config.py if present)
 CONTEXT_MONITOR_ENABLED = True
 CONTEXT_MAX_TOKENS = 200000
-CONTEXT_WARN_THRESHOLDS = [50, 70, 80, 90]
-CONTEXT_CHARS_PER_TOKEN = 4
+CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
+CONTEXT_CHARS_PER_TOKEN = 4  # Fallback when tiktoken unavailable
 CONTEXT_OVERHEAD_TOKENS = 19500
 
 # Load from config
@@ -33,7 +36,25 @@ if CONFIG_FILE.exists():
             if key in _config:
                 globals()[key] = _config[key]
     except Exception:
-        pass  # Use defaults on config error
+        pass
+
+# Try to load tiktoken for accurate counting
+_tokenizer = None
+_using_tiktoken = False
+try:
+    import tiktoken
+    # cl100k_base is closest to Claude's tokenizer
+    _tokenizer = tiktoken.get_encoding("cl100k_base")
+    _using_tiktoken = True
+except ImportError:
+    pass
+
+
+def count_tokens(text: str) -> int:
+    """Count tokens using tiktoken if available, else estimate from chars."""
+    if _tokenizer:
+        return len(_tokenizer.encode(text, disallowed_special=()))
+    return len(text) // CONTEXT_CHARS_PER_TOKEN
 
 
 def find_last_compaction(lines):
@@ -45,42 +66,45 @@ def find_last_compaction(lines):
     return 0
 
 
-def extract_content_chars(content):
-    """Extract character count from message content (string or list of blocks)."""
+def extract_content_text(content) -> str:
+    """Extract all text from message content for tokenization."""
     if isinstance(content, str):
-        return len(content)
+        return content
 
     if not isinstance(content, list):
-        return 0
+        return ""
 
-    total = 0
+    parts = []
     for block in content:
         if isinstance(block, str):
-            total += len(block)
+            parts.append(block)
         elif isinstance(block, dict):
             block_type = block.get('type', '')
 
             if block_type == 'text':
-                total += len(block.get('text', ''))
+                parts.append(block.get('text', ''))
             elif block_type == 'tool_use':
-                total += len(block.get('name', ''))
+                parts.append(block.get('name', ''))
                 inp = block.get('input', {})
                 if isinstance(inp, dict):
-                    total += len(json.dumps(inp, separators=(',', ':')))
+                    parts.append(json.dumps(inp, separators=(',', ':')))
             elif block_type == 'tool_result':
                 result = block.get('content', '')
                 if isinstance(result, str):
-                    total += len(result)
+                    parts.append(result)
                 elif isinstance(result, list):
-                    total += extract_content_chars(result)
+                    parts.append(extract_content_text(result))
             elif block_type == 'thinking':
-                total += len(block.get('thinking', ''))
+                # Note: thinking blocks are NOT in context for subsequent turns
+                # Only the current turn's thinking is counted by Claude
+                # We skip them to avoid overestimation
+                pass
 
-    return total
+    return '\n'.join(parts)
 
 
-def estimate_context(session_path):
-    """Estimate current context usage as percentage."""
+def estimate_context(session_path) -> tuple[float, int]:
+    """Estimate current context usage. Returns (percentage, token_count)."""
     try:
         with open(session_path) as f:
             lines = f.readlines()
@@ -88,24 +112,26 @@ def estimate_context(session_path):
         last_compact = find_last_compaction(lines)
         recent_lines = lines[last_compact:]
 
-        content_chars = 0
+        all_text = []
         for line in recent_lines:
             try:
                 obj = json.loads(line)
                 msg = obj.get('message', {})
                 if not msg:
                     continue
-                content_chars += len(msg.get('role', ''))
-                content_chars += extract_content_chars(msg.get('content', ''))
+                all_text.append(msg.get('role', ''))
+                all_text.append(extract_content_text(msg.get('content', '')))
             except:
                 pass
 
-        estimated_tokens = content_chars / CONTEXT_CHARS_PER_TOKEN
-        estimated_tokens += CONTEXT_OVERHEAD_TOKENS
+        combined_text = '\n'.join(all_text)
+        content_tokens = count_tokens(combined_text)
+        total_tokens = content_tokens + CONTEXT_OVERHEAD_TOKENS
 
-        return min(100, (estimated_tokens / CONTEXT_MAX_TOKENS) * 100)
+        pct = min(100, (total_tokens / CONTEXT_MAX_TOKENS) * 100)
+        return pct, total_tokens
     except:
-        return 0
+        return 0, 0
 
 
 def get_crossed_threshold(pct, last_threshold):
@@ -136,7 +162,6 @@ def set_last_warning(state_file, level):
 
 
 def main():
-    # Check if enabled
     if not CONTEXT_MONITOR_ENABLED:
         return
 
@@ -149,14 +174,13 @@ def main():
     session_id = Path(transcript_path).stem
     state_file = Path.home() / '.claude' / 'state' / f'{session_id}-context-level'
 
-    pct = estimate_context(transcript_path)
+    pct, tokens = estimate_context(transcript_path)
     last_threshold = get_last_warning(state_file)
     crossed = get_crossed_threshold(pct, last_threshold)
 
     if crossed:
         set_last_warning(state_file, crossed)
 
-        # Determine urgency based on threshold
         max_threshold = max(CONTEXT_WARN_THRESHOLDS)
         high_threshold = sorted(CONTEXT_WARN_THRESHOLDS)[-2] if len(CONTEXT_WARN_THRESHOLDS) > 1 else max_threshold
 
@@ -170,7 +194,9 @@ def main():
             urgency = "📊 NOTE"
             action = "/purge available if needed."
 
-        print(f"{urgency}: Context at ~{int(pct)}%. {action}")
+        # Show tokens and estimation method
+        method = "tiktoken" if _using_tiktoken else "estimated"
+        print(f"{urgency}: Context at {int(pct)}% (~{tokens:,} tokens, {method}). {action}")
     else:
         # Track decreases (e.g., after purge) to reset warning state
         current_max_crossed = 0

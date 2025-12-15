@@ -21,6 +21,9 @@ This system intercepts tool calls to manage context proactively:
 git clone https://github.com/YOUR_USERNAME/claude-context-manager.git
 cd claude-context-manager
 python3 install.py
+
+# Optional: accurate token counting (recommended)
+pip install tiktoken
 ```
 
 Hooks activate on your next Claude Code session.
@@ -93,10 +96,12 @@ Options:
 
 ### Context Warnings
 
-At 50%, 60%, 70%, 80%+ context usage, you'll see warnings:
+At 70%, 80%, 90% context usage (configurable), you'll see warnings:
 ```
-⚠️ WARNING: Context at ~72%. Consider running /purge soon.
+⚠️ WARNING: Context at 72% (~144,000 tokens, tiktoken). Consider running /purge soon.
 ```
+
+For accurate token counting, install tiktoken: `pip install tiktoken`
 
 ### The `/purge` Command
 

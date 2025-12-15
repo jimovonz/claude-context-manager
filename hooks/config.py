@@ -33,16 +33,15 @@ CONTEXT_MONITOR_ENABLED = True
 CONTEXT_MAX_TOKENS = 200000
 
 # Warn at these percentage thresholds (only warns once per threshold per session)
-CONTEXT_WARN_THRESHOLDS = [50, 70, 80, 90]
+CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 
-# Estimation parameters (see notes below)
-CONTEXT_CHARS_PER_TOKEN = 4
-CONTEXT_OVERHEAD_TOKENS = 19500
+# Estimation parameters
+CONTEXT_CHARS_PER_TOKEN = 4    # Fallback when tiktoken not installed
+CONTEXT_OVERHEAD_TOKENS = 19500  # System prompt + tools + memory
 
-# Notes on estimation accuracy:
-# - CHARS_PER_TOKEN: ~4 is reasonable average for Claude's tokenizer
-#   (code tends to be ~3, prose ~4-5, varies by language)
+# Accuracy notes:
+# - Install tiktoken for accurate counting: pip install tiktoken
+# - Without tiktoken, uses CHARS_PER_TOKEN estimate (~4 chars/token average)
 # - OVERHEAD_TOKENS: system prompt (~3k) + tools (~15k) + memory (~1.5k)
-#   This varies based on enabled tools and MCP servers
-# - The estimate is intentionally conservative - better to warn early
-# - For precise measurement, use /context command in Claude Code
+#   Adjust if you have many MCP servers or custom tools
+# - Thinking blocks are excluded (only current turn's thinking is in context)

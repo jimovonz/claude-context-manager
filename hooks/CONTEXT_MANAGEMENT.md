@@ -111,40 +111,38 @@ METRICS_ENABLED = False         # Enable metrics logging
 
 ## Context Monitor
 
-The context monitor estimates usage and warns at configurable thresholds.
+The context monitor tracks usage and warns at configurable thresholds.
+
+### Accurate Token Counting
+
+For accurate counting, install tiktoken:
+```bash
+pip install tiktoken
+```
+
+Without tiktoken, falls back to character-based estimation (~4 chars/token).
 
 ### Configuration
 
 In `config.py`:
 ```python
-CONTEXT_MONITOR_ENABLED = True              # Set False to disable
-CONTEXT_MAX_TOKENS = 200000                 # Claude's context window
-CONTEXT_WARN_THRESHOLDS = [50, 70, 80, 90]  # Warn at these percentages
-CONTEXT_CHARS_PER_TOKEN = 4                 # Estimation ratio
-CONTEXT_OVERHEAD_TOKENS = 19500             # System prompt + tools overhead
+CONTEXT_MONITOR_ENABLED = True           # Set False to disable
+CONTEXT_MAX_TOKENS = 200000              # Claude's context window
+CONTEXT_WARN_THRESHOLDS = [70, 80, 90]   # Warn at these percentages
+CONTEXT_CHARS_PER_TOKEN = 4              # Fallback ratio without tiktoken
+CONTEXT_OVERHEAD_TOKENS = 19500          # System prompt + tools overhead
 ```
 
-### Accuracy Limitations
+### Accuracy Notes
 
-The estimation is approximate:
+| Factor | With tiktoken | Without tiktoken |
+|--------|---------------|------------------|
+| Token counting | Accurate (cl100k_base) | ±20% estimate |
+| Thinking blocks | Excluded (correct) | Excluded (correct) |
+| Overhead | Fixed estimate | Fixed estimate |
+| Images/PDFs | Not counted | Not counted |
 
-| Factor | Impact | Notes |
-|--------|--------|-------|
-| Char/token ratio | ±20% | Code ~3 chars/token, prose ~4-5 |
-| Overhead | ±5k tokens | Varies with enabled tools, MCP servers |
-| Images/PDFs | Not counted | Binary content uses tokens but isn't measured |
-| Thinking blocks | Overcounted | Only current turn's thinking is actually in context |
-
-**The estimate is intentionally conservative** - better to warn early than miss compaction. For precise measurement, use Claude Code's `/context` command.
-
-### Why Not Use a Real Tokenizer?
-
-Adding `tiktoken` or similar would:
-- Add a dependency (~10MB)
-- Still not match Claude's exact tokenizer
-- Slow down every prompt submission
-
-The char-based estimate is fast and good enough for early warning.
+The overhead (system prompt + tools) is estimated at ~19.5k tokens. Adjust `CONTEXT_OVERHEAD_TOKENS` if you have many MCP servers.
 
 ## The `/purge` Command
 
