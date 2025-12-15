@@ -21,16 +21,57 @@ from pathlib import Path
 from datetime import datetime, timezone
 from typing import Optional
 
-# Context budget (tokens) - adjust if using MCP servers or custom tools
+# Context budget defaults (tokens) - overridden if /context output found in session
 CONTEXT_MAX_TOKENS = 200000
 CONTEXT_SYSTEM_PROMPT = 3100
 CONTEXT_SYSTEM_TOOLS = 15100
-CONTEXT_MEMORY_FILES = 1000  # ~860-1k typical
+CONTEXT_MEMORY_FILES = 1000
 CONTEXT_AUTOCOMPACT_BUFFER = 45000
-CONTEXT_MESSAGE_SPACE = (CONTEXT_MAX_TOKENS - CONTEXT_SYSTEM_PROMPT -
-                         CONTEXT_SYSTEM_TOOLS - CONTEXT_MEMORY_FILES -
-                         CONTEXT_AUTOCOMPACT_BUFFER)  # ~136k
-BYTES_PER_TOKEN = 4  # rough estimate for mixed content
+BYTES_PER_TOKEN = 4
+
+
+def parse_context_stats(session_path: Path) -> dict:
+    """Extract most recent /context output from session file."""
+    import re
+    stats = {}
+
+    # Patterns for /context output values
+    patterns = {
+        'system_prompt': r'System prompt: ([\d.]+)k',
+        'system_tools': r'System tools: ([\d.]+)k',
+        'memory_files': r'Memory files: ([\d,]+) tokens',
+    }
+
+    try:
+        content = session_path.read_text()
+        for key, pattern in patterns.items():
+            matches = re.findall(pattern, content)
+            if matches:
+                val = matches[-1].replace(',', '')  # last occurrence
+                if 'k' in pattern:
+                    stats[key] = int(float(val) * 1000)
+                else:
+                    stats[key] = int(val)
+    except Exception:
+        pass
+
+    return stats
+
+
+def get_message_space(session_path: Path) -> tuple[int, bool]:
+    """Calculate available message space. Returns (tokens, from_session)."""
+    stats = parse_context_stats(session_path)
+
+    if stats:
+        sys_prompt = stats.get('system_prompt', CONTEXT_SYSTEM_PROMPT)
+        sys_tools = stats.get('system_tools', CONTEXT_SYSTEM_TOOLS)
+        mem_files = stats.get('memory_files', CONTEXT_MEMORY_FILES)
+        space = CONTEXT_MAX_TOKENS - sys_prompt - sys_tools - mem_files - CONTEXT_AUTOCOMPACT_BUFFER
+        return space, True
+
+    # Fall back to defaults
+    space = CONTEXT_MAX_TOKENS - CONTEXT_SYSTEM_PROMPT - CONTEXT_SYSTEM_TOOLS - CONTEXT_MEMORY_FILES - CONTEXT_AUTOCOMPACT_BUFFER
+    return space, False
 
 
 def find_current_session(cwd: Optional[str] = None) -> Optional[Path]:
@@ -697,9 +738,11 @@ Examples:
 
     saved_bytes = results['original_size'] - results['new_size']
     saved_tokens = saved_bytes // BYTES_PER_TOKEN
-    pct_of_message_space = (saved_tokens / CONTEXT_MESSAGE_SPACE * 100)
+    message_space, from_session = get_message_space(session_file)
+    pct_of_message_space = (saved_tokens / message_space * 100)
 
-    print(f"Saved: ~{saved_tokens:,} tokens ({pct_of_message_space:.0f}% of message space)")
+    source = "from /context" if from_session else "estimated"
+    print(f"Saved: ~{saved_tokens:,} tokens ({pct_of_message_space:.0f}% of message space, {source})")
     print(f"       {saved_bytes:,} bytes")
 
 
