@@ -1,47 +1,21 @@
-# Contributing to Claude Context Manager
+# Contributing
 
-Thanks for your interest in contributing!
+## Issues
 
-## How to Contribute
+Before opening an issue:
+- Search existing issues
+- Include Python version, OS, Claude Code version
+- Provide reproduction steps
 
-### Reporting Issues
+## Pull Requests
 
-- Check existing issues before opening a new one
-- Include your Python version, OS, and Claude Code version
-- Provide steps to reproduce the issue
+1. Fork and create a feature branch
+2. Run tests: `python3 tests/test_hooks.py && python3 tests/test_purge.py`
+3. Submit PR with clear description
 
-### Pull Requests
+## Code Standards
 
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/my-feature`)
-3. Make your changes
-4. Run tests: `python3 tests/test_hooks.py && python3 tests/test_purge.py`
-5. Commit with a clear message
-6. Push and open a pull request
-
-### Code Style
-
-- Follow existing code patterns
-- Use type hints where practical
-- Keep functions focused and documented
-- Test new functionality
-
-### Testing
-
-Run the test suite before submitting:
-
-```bash
-python3 tests/test_hooks.py
-python3 tests/test_purge.py
-```
-
-Or with pytest:
-
-```bash
-pip install pytest
-pytest tests/ -v
-```
-
-## Questions?
-
-Open an issue for questions or discussion.
+- Match existing patterns
+- Type hints where practical
+- Focused functions
+- Test coverage for new features
