@@ -1,5 +1,9 @@
 # Claude Context Manager
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/rpl-james-overington2/claude-context-manager)
+[![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
 
 ## The Problem
@@ -15,10 +19,15 @@ This system intercepts tool calls to manage context proactively:
 3. **Delegate to subagents** - Task agents access full content without polluting main context
 4. **Purge on demand** - `/purge` command removes thinking blocks and truncates old outputs
 
+## Requirements
+
+- Python 3.10+
+- Claude Code CLI installed
+
 ## Installation
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/claude-context-manager.git
+git clone https://github.com/rpl-james-overington2/claude-context-manager.git
 cd claude-context-manager
 python3 install.py
 
@@ -90,6 +99,16 @@ However, if Claude Code changes its hook API in a breaking way, hooks may need u
 ```
 
 ## Usage
+
+### Important: "Blocking" Is Not an Error
+
+When hooks intercept a tool call, Claude Code displays it as an "error" or "blocking" message in the terminal. **This is normal behavior, not an actual error.** The hook has:
+
+1. Executed the command successfully
+2. Returned the results (inline or cached)
+3. Prevented double-execution by "blocking" the original call
+
+Treat these messages as successful results unless they explicitly indicate a failure.
 
 ### Automatic Interception
 

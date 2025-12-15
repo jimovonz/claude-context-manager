@@ -40,7 +40,6 @@ COMMAND_FILES = [
 CONFIG_FILES = [
     'setup.sh',
     'compact-instructions.txt',
-    'CLAUDE.md',
 ]
 
 # Hook matchers to remove from settings.json
@@ -130,6 +129,36 @@ def clean_settings():
         SETTINGS_FILE.write_text(json.dumps(settings, indent=2) + '\n')
 
 
+def clean_claude_md():
+    """Remove our section from CLAUDE.md, delete file if empty."""
+    import re
+
+    claude_md = CLAUDE_DIR / 'CLAUDE.md'
+    if not claude_md.exists():
+        return
+
+    content = claude_md.read_text()
+
+    # Check if our section exists
+    if '<!-- CONTEXT-MANAGER-START -->' not in content:
+        print("  CLAUDE.md (no section to remove)")
+        return
+
+    # Remove our section (including surrounding whitespace)
+    pattern = r'\n*<!-- CONTEXT-MANAGER-START -->.*?<!-- CONTEXT-MANAGER-END -->\n*'
+    new_content = re.sub(pattern, '', content, flags=re.DOTALL)
+    new_content = new_content.strip()
+
+    if new_content:
+        # Other content remains, keep the file
+        claude_md.write_text(new_content + '\n')
+        print("  CLAUDE.md (removed section, kept user content)")
+    else:
+        # File is empty, remove it
+        claude_md.unlink()
+        print("  CLAUDE.md (removed empty file)")
+
+
 def uninstall():
     """Uninstall hooks and commands."""
     print("Claude Context Manager - Uninstalling\n")
@@ -161,6 +190,7 @@ def uninstall():
             config_count += 1
     if config_count == 0:
         print("  No config files found")
+    clean_claude_md()
     print()
 
     # Clean settings.json

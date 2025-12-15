@@ -1,3 +1,4 @@
+<!-- CONTEXT-MANAGER-START -->
 # Context Management System
 
 This environment has hooks that manage context to prevent premature compaction.
@@ -42,3 +43,4 @@ These always return full content:
 - `~/.claude/hooks/config.py` - All settings
 - `~/.claude/compact-instructions.txt` - Compaction instructions
 - Full docs: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+<!-- CONTEXT-MANAGER-END -->

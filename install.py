@@ -152,8 +152,23 @@ def install():
             print("  compact-instructions.txt (kept existing)")
 
     if claude_md_src.exists():
-        shutil.copy2(claude_md_src, CLAUDE_DIR / 'CLAUDE.md')
-        print("  CLAUDE.md")
+        claude_md_dst = CLAUDE_DIR / 'CLAUDE.md'
+        our_content = claude_md_src.read_text()
+
+        if claude_md_dst.exists():
+            existing = claude_md_dst.read_text()
+            # Check if our section already exists
+            if '<!-- CONTEXT-MANAGER-START -->' in existing:
+                print("  CLAUDE.md (section already present)")
+            else:
+                # Append our section
+                with open(claude_md_dst, 'a') as f:
+                    f.write('\n\n' + our_content)
+                print("  CLAUDE.md (appended section)")
+        else:
+            # Create new file
+            claude_md_dst.write_text(our_content)
+            print("  CLAUDE.md (created)")
     print()
 
     # Make scripts executable

@@ -4,6 +4,8 @@ Configuration for Claude Code hooks.
 Edit these values to tune hook behavior.
 """
 
+__version__ = "1.0.0"
+
 from pathlib import Path
 
 # Cache settings
