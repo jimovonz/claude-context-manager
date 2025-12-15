@@ -16,29 +16,16 @@ sys.path.insert(0, str(Path(__file__).parent / 'lib'))
 DELAY_SECONDS = 3
 
 
-def find_claude_pid(exclude_pid: int = None) -> tuple[int, list[str]]:
-    """Find Claude process and its command line args."""
+def get_claude_cmdline(pid: int) -> list[str]:
+    """Get command line args for a process."""
     try:
-        result = subprocess.run(
-            ['pgrep', '-a', 'claude'],
-            capture_output=True, text=True
-        )
-        for line in result.stdout.strip().split('\n'):
-            if not line:
-                continue
-            parts = line.split(None, 1)
-            pid = int(parts[0])
-            if exclude_pid and pid == exclude_pid:
-                continue
-            # Get full cmdline
-            cmdline_path = Path(f'/proc/{pid}/cmdline')
-            if cmdline_path.exists():
-                cmdline = cmdline_path.read_bytes().decode().split('\0')
-                cmdline = [c for c in cmdline if c]  # Remove empty
-                return pid, cmdline
+        cmdline_path = Path(f'/proc/{pid}/cmdline')
+        if cmdline_path.exists():
+            cmdline = cmdline_path.read_bytes().decode().split('\0')
+            return [c for c in cmdline if c]
     except Exception:
         pass
-    return None, []
+    return []
 
 
 def get_session_id(cwd: str) -> str:
@@ -63,6 +50,31 @@ def get_session_id(cwd: str) -> str:
     return None
 
 
+def build_resume_cmd(original_args: list[str], session_id: str) -> str:
+    """Build resume command preserving original flags."""
+    # Start with claude
+    cmd_parts = ['claude']
+
+    # Preserve flags from original command (skip 'claude' itself and any --resume/--continue)
+    skip_next = False
+    for arg in original_args[1:]:  # Skip first element (claude binary path)
+        if skip_next:
+            skip_next = False
+            continue
+        if arg in ('--resume', '--continue', '-c'):
+            skip_next = arg == '--resume'  # --resume takes a value
+            continue
+        if arg.startswith('--resume='):
+            continue
+        cmd_parts.append(arg)
+
+    # Add resume with session
+    cmd_parts.append('--resume')
+    cmd_parts.append(session_id)
+
+    return ' '.join(cmd_parts)
+
+
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -70,6 +82,7 @@ def main():
     parser.add_argument('--cwd', required=True, help='Working directory')
     parser.add_argument('--delay', type=int, default=DELAY_SECONDS)
     parser.add_argument('--session', help='Session ID to resume')
+    parser.add_argument('--original-args', help='Original claude command line (colon-separated)')
     args = parser.parse_args()
 
     # Detach from parent
@@ -82,10 +95,17 @@ def main():
     # Wait
     time.sleep(args.delay)
 
+    # Get original args
+    original_args = []
+    if args.original_args:
+        original_args = args.original_args.split(':')
+    else:
+        original_args = get_claude_cmdline(args.pid)
+
     # Build resume command
     session_id = args.session or get_session_id(args.cwd)
     if session_id:
-        cmd = f"claude --resume {session_id}"
+        cmd = build_resume_cmd(original_args, session_id)
     else:
         cmd = "claude --continue"
 

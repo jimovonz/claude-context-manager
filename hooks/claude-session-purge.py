@@ -778,6 +778,15 @@ Examples:
             session_id = session_file.stem
             restart_script = Path(__file__).parent / 'auto-restart.py'
 
+            # Get original cmdline for the Claude process
+            original_args = ''
+            try:
+                cmdline = Path(f'/proc/{claude_pid}/cmdline').read_bytes().decode().split('\0')
+                cmdline = [c for c in cmdline if c]
+                original_args = ':'.join(cmdline)  # Colon-separated to avoid shell issues
+            except:
+                pass
+
             print()
             print(f"Auto-restart in {args.restart_delay}s (PID {claude_pid})...")
 
@@ -787,6 +796,7 @@ Examples:
                 '--cwd', cwd,
                 '--delay', str(args.restart_delay),
                 '--session', session_id,
+                '--original-args', original_args,
             ], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:
             print()
