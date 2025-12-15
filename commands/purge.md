@@ -2,9 +2,9 @@ Run the session purge tool to reduce context usage by removing thinking blocks a
 
 Execute:
 ```bash
-~/.claude/hooks/claude-session-purge.py --current --verbose
+~/.claude/hooks/claude-session-purge.py --current --verbose --restart
 ```
 
 After running, report the results (bytes saved, blocks removed, repairs made).
 
-If the purge was successful and freed significant space, acknowledge that context pressure should be reduced.
+Note: --restart will auto-kill and resume Claude in 3 seconds to apply the purged context. The session will restart automatically.

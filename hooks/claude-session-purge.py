@@ -669,6 +669,10 @@ Examples:
                         help='Disable automatic synthetic compaction injection (by default, sessions without compaction get one injected to enable full purging)')
     parser.add_argument('--dry-run', action='store_true', help='Report changes without writing')
     parser.add_argument('--verbose', '-v', action='store_true', help='Show detailed progress')
+    parser.add_argument('--restart', '-r', action='store_true',
+                        help='Auto-restart Claude after purge (kills current session, resumes with purged context)')
+    parser.add_argument('--restart-delay', type=int, default=3,
+                        help='Seconds to wait before restart (default: 3)')
 
     args = parser.parse_args()
 
@@ -744,6 +748,49 @@ Examples:
     source = "from /context" if from_session else "estimated"
     print(f"Saved: ~{saved_tokens:,} tokens ({pct_of_message_space:.0f}% of message space, {source})")
     print(f"       {saved_bytes:,} bytes")
+
+    # Auto-restart if requested
+    if args.restart and not args.dry_run:
+        import subprocess
+
+        # Find Claude PID
+        claude_pid = None
+        try:
+            result = subprocess.run(['pgrep', '-f', 'claude'], capture_output=True, text=True)
+            pids = [int(p) for p in result.stdout.strip().split('\n') if p]
+            # Find the main Claude process (not this script's ancestors)
+            my_pid = os.getpid()
+            for pid in pids:
+                if pid != my_pid:
+                    # Check if it's actually claude binary
+                    try:
+                        exe = os.readlink(f'/proc/{pid}/exe')
+                        if 'claude' in exe or 'node' in exe:
+                            claude_pid = pid
+                            break
+                    except:
+                        pass
+        except:
+            pass
+
+        if claude_pid:
+            cwd = os.getcwd()
+            session_id = session_file.stem
+            restart_script = Path(__file__).parent / 'auto-restart.py'
+
+            print()
+            print(f"Auto-restart in {args.restart_delay}s (PID {claude_pid})...")
+
+            subprocess.Popen([
+                sys.executable, str(restart_script),
+                '--pid', str(claude_pid),
+                '--cwd', cwd,
+                '--delay', str(args.restart_delay),
+                '--session', session_id,
+            ], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        else:
+            print()
+            print("Warning: Could not find Claude PID for auto-restart")
 
 
 if __name__ == '__main__':
