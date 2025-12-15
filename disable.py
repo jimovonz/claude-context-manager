@@ -21,6 +21,7 @@ OUR_HOOK_PATHS = [
     '~/.claude/hooks/intercept-grep.py',
     '~/.claude/hooks/intercept-read.py',
     '~/.claude/hooks/learn-large-commands.py',
+    '~/.claude/hooks/pre-compact.py',
 ]
 
 

@@ -26,6 +26,7 @@ HOOK_FILES = [
     'learn-large-commands.py',
     'review-learned-commands.py',
     'claude-session-purge.py',
+    'pre-compact.py',
     'CONTEXT_MANAGEMENT.md',
     'lib/__init__.py',
     'lib/common.py',
@@ -35,11 +36,18 @@ COMMAND_FILES = [
     'purge.md',
 ]
 
+# Config files in ~/.claude (not in hooks/)
+CONFIG_FILES = [
+    'setup.sh',
+    'compact-instructions.txt',
+]
+
 # Hook matchers to remove from settings.json
 HOOK_MATCHERS = {
     'UserPromptSubmit': [''],
     'PreToolUse': ['Bash', 'Glob', 'Grep', 'Read'],
     'PostToolUse': ['Bash'],
+    'PreCompact': [''],
 }
 
 
@@ -67,7 +75,7 @@ def remove_files(base_dir: Path, files: list, description: str) -> int:
 
 
 def clean_settings():
-    """Remove our hooks from settings.json."""
+    """Remove our hooks and env vars from settings.json."""
     if not SETTINGS_FILE.exists():
         return
 
@@ -77,8 +85,21 @@ def clean_settings():
         print("  Warning: settings.json is invalid, skipping")
         return
 
-    hooks = settings.get('hooks', {})
     modified = False
+
+    # Remove env vars we added
+    env = settings.get('env', {})
+    if 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' in env:
+        del env['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']
+        modified = True
+        print("  Removed CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env var")
+
+    # Remove empty env object
+    if not env and 'env' in settings:
+        del settings['env']
+
+    # Remove hooks
+    hooks = settings.get('hooks', {})
 
     for event, matchers in HOOK_MATCHERS.items():
         if event not in hooks:
@@ -127,6 +148,19 @@ def uninstall():
         if count == 0:
             print("  No command files found")
         print()
+
+    # Remove config files from ~/.claude
+    print("Removing configuration files:")
+    config_count = 0
+    for config_file in CONFIG_FILES:
+        config_path = CLAUDE_DIR / config_file
+        if config_path.exists():
+            config_path.unlink()
+            print(f"  Removed: {config_file}")
+            config_count += 1
+    if config_count == 0:
+        print("  No config files found")
+    print()
 
     # Clean settings.json
     print("Cleaning settings.json:")

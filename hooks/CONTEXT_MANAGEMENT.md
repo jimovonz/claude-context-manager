@@ -45,6 +45,7 @@ Main Agent                          Subagent (Task)
 | `intercept-read.py` | PreToolUse:Read | Cache large files, whitelist configs |
 | `learn-large-commands.py` | PostToolUse:Bash | Learn patterns from large outputs |
 | `context-monitor.py` | UserPromptSubmit | Monitor context usage |
+| `pre-compact.py` | PreCompact | Inject custom compaction instructions |
 
 ## Working With This System
 
@@ -194,3 +195,90 @@ rm -rf ~/.claude/cache/*
 ### Check hook registration
 
 Hooks must be registered in `~/.claude/settings.json` to be active. Placing files in `~/.claude/hooks/` alone does nothing.
+
+## Quick Launch with 'c' Alias
+
+After installation, enable the quick-launch alias:
+
+```bash
+source ~/.claude/setup.sh
+c  # Launches claude --dangerously-skip-permissions
+```
+
+To make permanent, add to `~/.bashrc` or `~/.zshrc`:
+```bash
+source ~/.claude/setup.sh
+```
+
+Or just add the alias directly:
+```bash
+alias c='claude --dangerously-skip-permissions'
+```
+
+### Configuration via setup.sh
+
+```bash
+COMPACT_PCT=0.5 source ~/.claude/setup.sh  # Custom compact threshold
+SKIP_PERMISSIONS=false source ~/.claude/setup.sh  # Disable skip-permissions
+```
+
+## Auto-Compaction Control
+
+Control when automatic compaction triggers via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`.
+
+### Configuration
+
+In `config.py`:
+```python
+AUTOCOMPACT_ENABLED = True   # Enable threshold override
+AUTOCOMPACT_THRESHOLD = 0.6  # Trigger at 60% context (0.0-1.0)
+```
+
+The threshold is set in `~/.claude/settings.json`:
+```json
+{
+  "env": {
+    "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": "0.6"
+  }
+}
+```
+
+### Why Control Compaction?
+
+The default compaction threshold is often too aggressive. By setting it to 60%, you:
+- Get more context utilization before compaction kicks in
+- Maintain longer reasoning chains
+- Allow the context monitor to warn you before compaction
+
+## Custom Compaction Instructions
+
+When compaction does occur, the `pre-compact.py` hook injects custom instructions to guide what gets preserved.
+
+### Customizing
+
+Edit `~/.claude/compact-instructions.txt`:
+
+```
+Focus on preserving:
+- Current task context and objectives
+- Key decisions made and their rationale
+- Important file paths and code locations discovered
+- Any pending actions or TODOs
+- Error messages and debugging context being investigated
+- Critical state (connections, configurations, credentials referenced)
+
+Summarize completed work concisely. Prioritize actionable context over historical details.
+Maintain enough context to continue the current task without re-reading files.
+```
+
+### Configuration
+
+In `config.py`:
+```python
+PRE_COMPACT_ENABLED = True  # Set False to disable
+
+# Default instructions (used if compact-instructions.txt doesn't exist)
+COMPACT_INSTRUCTIONS = """Focus on preserving:
+- Current task context and objectives
+..."""
+```

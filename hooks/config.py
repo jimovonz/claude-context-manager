@@ -45,3 +45,33 @@ CONTEXT_OVERHEAD_TOKENS = 19500  # System prompt + tools + memory
 # - OVERHEAD_TOKENS: system prompt (~3k) + tools (~15k) + memory (~1.5k)
 #   Adjust if you have many MCP servers or custom tools
 # - Thinking blocks are excluded (only current turn's thinking is in context)
+
+# =============================================================================
+# Auto-Compaction Settings
+# =============================================================================
+
+# Enable auto-compact threshold override (set via CLAUDE_AUTOCOMPACT_PCT_OVERRIDE env var)
+AUTOCOMPACT_ENABLED = True
+
+# Default threshold (0.0-1.0): triggers compaction at this % of max context
+# 0.6 = 60% of context window triggers compaction
+AUTOCOMPACT_THRESHOLD = 0.6
+
+# =============================================================================
+# Pre-Compact Hook Settings
+# =============================================================================
+
+# Enable/disable PreCompact hook
+PRE_COMPACT_ENABLED = True
+
+# Default compaction instructions (used if ~/.claude/compact-instructions.txt doesn't exist)
+COMPACT_INSTRUCTIONS = """Focus on preserving:
+- Current task context and objectives
+- Key decisions made and their rationale
+- Important file paths and code locations discovered
+- Any pending actions or TODOs
+- Error messages and debugging context being investigated
+- Critical state (connections, configurations, credentials referenced)
+
+Summarize completed work concisely. Prioritize actionable context over historical details.
+Maintain enough context to continue the current task without re-reading files."""

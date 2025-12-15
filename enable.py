@@ -44,6 +44,12 @@ HOOK_CONFIG = {
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": "~/.claude/hooks/learn-large-commands.py"}]
             }
+        ],
+        "PreCompact": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": "~/.claude/hooks/pre-compact.py"}]
+            }
         ]
     }
 }

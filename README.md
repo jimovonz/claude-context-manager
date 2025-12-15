@@ -28,6 +28,19 @@ pip install tiktoken
 
 Hooks activate on your next Claude Code session.
 
+### Quick Start
+
+After installation:
+```bash
+source ~/.claude/setup.sh  # Enable 'c' alias
+c                          # Launch with --dangerously-skip-permissions
+```
+
+To make permanent, add to `~/.bashrc` or `~/.zshrc`:
+```bash
+source ~/.claude/setup.sh
+```
+
 ## Uninstallation
 
 ```bash
@@ -65,11 +78,14 @@ However, if Claude Code changes its hook API in a breaking way, hooks may need u
 │   ├── intercept-read.py      # Large file read interception
 │   ├── context-monitor.py     # Context usage warnings
 │   ├── learn-large-commands.py # Pattern learning
+│   ├── pre-compact.py         # Custom compaction instructions
 │   ├── claude-session-purge.py # Session purge tool
 │   ├── config.py              # Configuration
 │   └── lib/common.py          # Shared library
 ├── commands/
 │   └── purge.md               # /purge slash command
+├── setup.sh                   # Shell alias setup
+├── compact-instructions.txt   # Compaction instructions (customizable)
 └── settings.json              # Hook registration (merged)
 ```
 
@@ -110,18 +126,42 @@ When context is critical, run `/purge` to:
 - Truncate large tool outputs
 - Repair any structural issues
 
+### Auto-Compaction Control
+
+Compaction triggers at 60% context by default (configurable). This is set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in settings.json.
+
+### Custom Compaction Instructions
+
+When compaction occurs, `pre-compact.py` provides instructions for what to preserve. Customize by editing:
+```bash
+~/.claude/compact-instructions.txt
+```
+
 ## Configuration
 
 Edit `~/.claude/hooks/config.py`:
 
 ```python
+# Cache settings
 CACHE_DIR = Path.home() / '.claude' / 'cache'
 CACHE_MAX_AGE_MINUTES = 60
 
-BASH_THRESHOLD = 2000     # bytes
+# Output thresholds (bytes)
+BASH_THRESHOLD = 2000
 GLOB_THRESHOLD = 2000
 GREP_THRESHOLD = 2000
 READ_THRESHOLD = 25000
+
+# Auto-compaction
+AUTOCOMPACT_ENABLED = True
+AUTOCOMPACT_THRESHOLD = 0.6  # 60% of context
+
+# Pre-compact hook
+PRE_COMPACT_ENABLED = True
+
+# Context monitor
+CONTEXT_MONITOR_ENABLED = True
+CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 
 PATTERNS_EXPIRY_DAYS = 30
 METRICS_ENABLED = False

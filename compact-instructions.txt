@@ -1,0 +1,10 @@
+Focus on preserving:
+- Current task context and objectives
+- Key decisions made and their rationale
+- Important file paths and code locations discovered
+- Any pending actions or TODOs
+- Error messages and debugging context being investigated
+- Critical state (connections, configurations, credentials referenced)
+
+Summarize completed work concisely. Prioritize actionable context over historical details.
+Maintain enough context to continue the current task without re-reading files.

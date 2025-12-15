@@ -16,8 +16,14 @@ HOOKS_DIR = CLAUDE_DIR / 'hooks'
 COMMANDS_DIR = CLAUDE_DIR / 'commands'
 SETTINGS_FILE = CLAUDE_DIR / 'settings.json'
 
+# Default autocompact threshold (can be changed in config.py)
+DEFAULT_AUTOCOMPACT_THRESHOLD = "0.6"
+
 # Hook configurations to merge into settings.json
 HOOK_CONFIG = {
+    "env": {
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD
+    },
     "hooks": {
         "UserPromptSubmit": [
             {
@@ -47,6 +53,12 @@ HOOK_CONFIG = {
             {
                 "matcher": "Bash",
                 "hooks": [{"type": "command", "command": "~/.claude/hooks/learn-large-commands.py"}]
+            }
+        ],
+        "PreCompact": [
+            {
+                "matcher": "",
+                "hooks": [{"type": "command", "command": "~/.claude/hooks/pre-compact.py"}]
             }
         ]
     }
@@ -119,6 +131,26 @@ def install():
         cmd_count = copy_directory(commands_src, COMMANDS_DIR, "commands")
         print(f"  ({cmd_count} files)\n")
 
+    # Copy setup.sh and compact-instructions.txt
+    print("Installing configuration files:")
+    setup_src = SCRIPT_DIR / 'setup.sh'
+    compact_src = SCRIPT_DIR / 'compact-instructions.txt'
+
+    if setup_src.exists():
+        shutil.copy2(setup_src, CLAUDE_DIR / 'setup.sh')
+        (CLAUDE_DIR / 'setup.sh').chmod(0o755)
+        print("  setup.sh")
+
+    if compact_src.exists():
+        # Only copy if doesn't exist (preserve user customizations)
+        compact_dst = CLAUDE_DIR / 'compact-instructions.txt'
+        if not compact_dst.exists():
+            shutil.copy2(compact_src, compact_dst)
+            print("  compact-instructions.txt")
+        else:
+            print("  compact-instructions.txt (kept existing)")
+    print()
+
     # Make scripts executable
     print("Setting permissions...")
     for py_file in HOOKS_DIR.rglob('*.py'):
@@ -147,8 +179,16 @@ def install():
     print()
     print("Hooks will activate on next Claude Code session.")
     print()
+    print("Quick start:")
+    print("  source ~/.claude/setup.sh  # Enable 'c' alias")
+    print("  c                          # Launch with --dangerously-skip-permissions")
+    print()
+    print("Configuration:")
+    print("  ~/.claude/hooks/config.py            # All settings")
+    print("  ~/.claude/compact-instructions.txt   # Compaction instructions")
+    print("  ~/.claude/setup.sh                   # Shell alias setup")
+    print()
     print("Documentation: ~/.claude/hooks/CONTEXT_MANAGEMENT.md")
-    print("Configuration: ~/.claude/hooks/config.py")
     print()
     print("To uninstall: python3 uninstall.py")
 
