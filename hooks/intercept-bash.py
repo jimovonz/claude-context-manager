@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output, build_cache_response,
-    log_metric, run_command, BASH_THRESHOLD, CACHE_DIR
+    log_metric, run_command, probe_command, is_blacklisted_interactive,
+    BASH_THRESHOLD, CACHE_DIR
 )
 
 
@@ -46,13 +47,11 @@ def is_obviously_small(cmd: str) -> bool:
 
 
 def is_obviously_interactive(cmd: str) -> bool:
-    """Check if command is interactive."""
+    """Check if command is obviously interactive (TTY-based)."""
     interactive_patterns = [
         r'^(vim|vi|nano|emacs|less|more|man|top|htop|btop|watch)\s+',
         r'^(ssh|telnet|ftp|sftp)\s+',
         r'^(python|python3|node|ruby|irb|ghci)$',
-        # OAuth/device flow commands that wait for browser
-        r'^gh\s+auth\s+(login|refresh|status)',
     ]
 
     for pattern in interactive_patterns:
@@ -61,6 +60,10 @@ def is_obviously_interactive(cmd: str) -> bool:
 
     # Check for -i flag
     if re.search(r'(^|\s)-i(\s|$)', cmd):
+        return True
+
+    # Check learned interactive commands
+    if is_blacklisted_interactive(cmd):
         return True
 
     return False
@@ -105,9 +108,16 @@ def main():
         json_pass()
         return
 
-    # Execute everything else
+    # Execute with interactive detection
     timeout_sec = min(max(timeout_ms // 1000, 1), 600)
-    output, exit_code = run_command(cmd, cwd, timeout_sec)
+    output, exit_code, is_interactive = probe_command(cmd, cwd, timeout_sec)
+
+    # If detected as interactive, pass through to Claude
+    if is_interactive:
+        log_metric("Bash", "interactive-learned", 0)
+        json_pass()
+        return
+
     size = len(output)
 
     # Return result (always block to avoid double-execution)
