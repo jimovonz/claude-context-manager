@@ -40,6 +40,7 @@ CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 # Estimation parameters
 CONTEXT_CHARS_PER_TOKEN = 2.5  # Fallback when tiktoken not installed (empirically ~2.4)
 CONTEXT_OVERHEAD_TOKENS = 45000  # Visible (~20k) + hidden Claude overhead (~25k)
+CONTEXT_MESSAGE_MULTIPLIER = 1.5  # Claude counts more than extracted text (structure, metadata)
 
 # Accuracy notes:
 # - Install tiktoken for accurate counting: pip install tiktoken

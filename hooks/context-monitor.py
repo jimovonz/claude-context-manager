@@ -23,6 +23,7 @@ CONTEXT_MAX_TOKENS = 200000
 CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 CONTEXT_CHARS_PER_TOKEN = 2.5  # Fallback when tiktoken unavailable (empirically ~2.4)
 CONTEXT_OVERHEAD_TOKENS = 45000  # Visible (~20k) + hidden Claude overhead (~25k)
+CONTEXT_MESSAGE_MULTIPLIER = 1.5  # Claude counts more than extracted text (structure, metadata)
 
 # Load from config
 CONFIG_FILE = HOOKS_DIR / 'config.py'
@@ -32,7 +33,7 @@ if CONFIG_FILE.exists():
         exec(CONFIG_FILE.read_text(), _config)
         for key in ['CONTEXT_MONITOR_ENABLED', 'CONTEXT_MAX_TOKENS',
                     'CONTEXT_WARN_THRESHOLDS', 'CONTEXT_CHARS_PER_TOKEN',
-                    'CONTEXT_OVERHEAD_TOKENS']:
+                    'CONTEXT_OVERHEAD_TOKENS', 'CONTEXT_MESSAGE_MULTIPLIER']:
             if key in _config:
                 globals()[key] = _config[key]
     except Exception:
@@ -142,7 +143,9 @@ def estimate_context(session_path) -> tuple[float, int]:
 
         combined_text = '\n'.join(all_text)
         content_tokens = count_tokens(combined_text)
-        total_tokens = content_tokens + CONTEXT_OVERHEAD_TOKENS
+        # Apply multiplier to account for Claude's additional structure/metadata
+        adjusted_tokens = int(content_tokens * CONTEXT_MESSAGE_MULTIPLIER)
+        total_tokens = adjusted_tokens + CONTEXT_OVERHEAD_TOKENS
 
         pct = min(100, (total_tokens / CONTEXT_MAX_TOKENS) * 100)
         return pct, total_tokens
