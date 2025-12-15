@@ -131,10 +131,11 @@ def install():
         cmd_count = copy_directory(commands_src, COMMANDS_DIR, "commands")
         print(f"  ({cmd_count} files)\n")
 
-    # Copy setup.sh and compact-instructions.txt
+    # Copy setup.sh, compact-instructions.txt, and CLAUDE.md
     print("Installing configuration files:")
     setup_src = SCRIPT_DIR / 'setup.sh'
     compact_src = SCRIPT_DIR / 'compact-instructions.txt'
+    claude_md_src = SCRIPT_DIR / 'CLAUDE.md'
 
     if setup_src.exists():
         shutil.copy2(setup_src, CLAUDE_DIR / 'setup.sh')
@@ -149,6 +150,10 @@ def install():
             print("  compact-instructions.txt")
         else:
             print("  compact-instructions.txt (kept existing)")
+
+    if claude_md_src.exists():
+        shutil.copy2(claude_md_src, CLAUDE_DIR / 'CLAUDE.md')
+        print("  CLAUDE.md")
     print()
 
     # Make scripts executable

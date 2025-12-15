@@ -40,6 +40,7 @@ COMMAND_FILES = [
 CONFIG_FILES = [
     'setup.sh',
     'compact-instructions.txt',
+    'CLAUDE.md',
 ]
 
 # Hook matchers to remove from settings.json
