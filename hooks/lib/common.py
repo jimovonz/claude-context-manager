@@ -167,29 +167,80 @@ def run_command(cmd: str, cwd: Optional[str] = None, timeout: int = 120) -> Tupl
         return str(e), 1
 
 
-# Interactive commands blacklist
-INTERACTIVE_COMMANDS_FILE = HOOKS_DIR / 'interactive-commands.txt'
+# Command classification cache
+COMMAND_CACHE_FILE = HOOKS_DIR / 'command-cache.json'
 PROBE_TIMEOUT = 2.0  # Seconds to wait before assuming command is interactive
 
 
-def load_interactive_blacklist() -> set:
-    """Load learned interactive command patterns."""
-    if not INTERACTIVE_COMMANDS_FILE.exists():
-        return set()
-    patterns = set()
-    for line in INTERACTIVE_COMMANDS_FILE.read_text().splitlines():
-        line = line.strip()
-        if line and not line.startswith('#'):
-            patterns.add(line)
-    return patterns
+def load_command_cache() -> dict:
+    """Load cached command classifications."""
+    if not COMMAND_CACHE_FILE.exists():
+        return {}
+    try:
+        return json.loads(COMMAND_CACHE_FILE.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
 
 
-def save_interactive_pattern(pattern: str) -> None:
-    """Add a pattern to the interactive commands blacklist."""
-    existing = load_interactive_blacklist()
-    if pattern not in existing:
-        with open(INTERACTIVE_COMMANDS_FILE, 'a') as f:
-            f.write(f"{pattern}\n")
+def save_command_cache(cache: dict) -> None:
+    """Save command classification cache."""
+    try:
+        COMMAND_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+    except OSError:
+        pass
+
+
+def classify_with_haiku(cmd: str, pattern: str) -> Optional[dict]:
+    """Ask Haiku to classify a command. Returns {"interactive": 0|1, "large_output": 0|1}."""
+    prompt = f'''Classify this Linux command. Reply ONLY with JSON, no other text.
+{{"interactive": 0 or 1, "large_output": 0 or 1}}
+
+interactive=1 if command may prompt for user input (passwords, confirmations, OAuth, Y/n prompts)
+large_output=1 if command typically produces more than 50 lines of output
+
+Command: {cmd}
+Pattern: {pattern}'''
+
+    try:
+        result = subprocess.run(
+            ['claude', '-p', prompt, '--model', 'haiku'],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        if result.returncode == 0:
+            # Parse JSON from response
+            response = result.stdout.strip()
+            # Handle case where response has extra text
+            import re
+            match = re.search(r'\{[^}]+\}', response)
+            if match:
+                return json.loads(match.group())
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError, OSError):
+        pass
+    return None
+
+
+def get_command_classification(cmd: str) -> Optional[dict]:
+    """Get classification for a command, using cache or Haiku."""
+    pattern = extract_command_pattern(cmd)
+    if not pattern:
+        return None
+
+    # Check cache
+    cache = load_command_cache()
+    if pattern in cache:
+        return cache[pattern]
+
+    # Ask Haiku
+    classification = classify_with_haiku(cmd, pattern)
+    if classification:
+        # Cache result
+        cache[pattern] = classification
+        save_command_cache(cache)
+        return classification
+
+    return None
 
 
 def extract_command_pattern(cmd: str) -> Optional[str]:
@@ -226,32 +277,47 @@ def extract_command_pattern(cmd: str) -> Optional[str]:
     return base
 
 
-def is_blacklisted_interactive(cmd: str) -> bool:
-    """Check if command matches a known interactive pattern."""
-    blacklist = load_interactive_blacklist()
-    if not blacklist:
-        return False
+def is_cached_interactive(cmd: str) -> Optional[bool]:
+    """Check if command is cached as interactive. Returns None if not cached."""
+    pattern = extract_command_pattern(cmd)
+    if not pattern:
+        return None
 
-    import shlex
-    try:
-        parts = shlex.split(cmd)
-    except ValueError:
-        parts = cmd.split()
+    cache = load_command_cache()
+    if pattern in cache:
+        return cache[pattern].get('interactive', 0) == 1
 
-    if not parts:
-        return False
+    return None
 
-    # Check exact base command
-    if parts[0] in blacklist:
-        return True
 
-    # Check two-level pattern
-    if len(parts) > 1:
-        two_level = f"{parts[0]} {parts[1]}"
-        if two_level in blacklist:
-            return True
+def is_cached_large_output(cmd: str) -> Optional[bool]:
+    """Check if command is cached as large output. Returns None if not cached."""
+    pattern = extract_command_pattern(cmd)
+    if not pattern:
+        return None
 
-    return False
+    cache = load_command_cache()
+    if pattern in cache:
+        return cache[pattern].get('large_output', 0) == 1
+
+    return None
+
+
+def learn_command_classification(cmd: str, interactive: bool = False, large_output: bool = False) -> None:
+    """Learn a command classification from runtime behavior."""
+    pattern = extract_command_pattern(cmd)
+    if not pattern:
+        return
+
+    cache = load_command_cache()
+    # Only update if not already cached (don't override Haiku's judgment with runtime guess)
+    if pattern not in cache:
+        cache[pattern] = {
+            'interactive': 1 if interactive else 0,
+            'large_output': 1 if large_output else 0,
+            'source': 'learned'
+        }
+        save_command_cache(cache)
 
 
 def probe_command(cmd: str, cwd: Optional[str] = None,

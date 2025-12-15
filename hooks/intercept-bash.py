@@ -17,7 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output, build_cache_response,
-    log_metric, run_command, probe_command, is_blacklisted_interactive,
+    log_metric, run_command, probe_command, get_command_classification,
+    is_cached_interactive, learn_command_classification,
     BASH_THRESHOLD, CACHE_DIR
 )
 
@@ -49,7 +50,7 @@ def is_obviously_small(cmd: str) -> bool:
 def is_obviously_interactive(cmd: str) -> bool:
     """Check if command is obviously interactive (TTY-based)."""
     interactive_patterns = [
-        r'^(vim|vi|nano|emacs|less|more|man|top|htop|btop|watch)\s+',
+        r'^(vim|vi|nano|emacs|less|more|man|top|htop|btop|watch)\s*',
         r'^(ssh|telnet|ftp|sftp)\s+',
         r'^(python|python3|node|ruby|irb|ghci)$',
     ]
@@ -62,11 +63,23 @@ def is_obviously_interactive(cmd: str) -> bool:
     if re.search(r'(^|\s)-i(\s|$)', cmd):
         return True
 
-    # Check learned interactive commands
-    if is_blacklisted_interactive(cmd):
+    # Check cache for known interactive commands
+    cached = is_cached_interactive(cmd)
+    if cached is True:
         return True
 
     return False
+
+
+def classify_unknown_command(cmd: str) -> dict:
+    """Classify unknown command using Haiku or probe."""
+    # Try Haiku classification (cached or fresh)
+    classification = get_command_classification(cmd)
+    if classification:
+        return classification
+
+    # Fallback: assume non-interactive, small output
+    return {'interactive': 0, 'large_output': 0}
 
 
 def main():
@@ -108,17 +121,30 @@ def main():
         json_pass()
         return
 
-    # Execute with interactive detection
+    # For unknown commands, classify with Haiku before running
+    classification = classify_unknown_command(cmd)
+
+    if classification.get('interactive', 0) == 1:
+        log_metric("Bash", "haiku-interactive", 0)
+        json_pass()
+        return
+
+    # Execute with probe as backup detection
     timeout_sec = min(max(timeout_ms // 1000, 1), 600)
     output, exit_code, is_interactive = probe_command(cmd, cwd, timeout_sec)
 
-    # If detected as interactive, pass through to Claude
+    # If probe detected as interactive (Haiku was wrong), learn and pass through
     if is_interactive:
-        log_metric("Bash", "interactive-learned", 0)
+        learn_command_classification(cmd, interactive=True)
+        log_metric("Bash", "probe-interactive", 0)
         json_pass()
         return
 
     size = len(output)
+
+    # Learn if output was large
+    if size > BASH_THRESHOLD:
+        learn_command_classification(cmd, large_output=True)
 
     # Return result (always block to avoid double-execution)
     if size <= BASH_THRESHOLD:
