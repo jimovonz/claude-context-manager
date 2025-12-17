@@ -95,6 +95,44 @@ def get_message_space(session_path: Path) -> tuple[int, bool]:
     return space, False
 
 
+def find_claude_pid_from_parent_chain() -> Optional[int]:
+    """
+    Find the Claude process by walking up the parent chain.
+    This is the most reliable method - we find the Claude that invoked us.
+    """
+    pid = os.getpid()
+    while pid > 1:
+        try:
+            # Read status file for parent PID and name
+            status_path = f'/proc/{pid}/status'
+            with open(status_path) as f:
+                ppid = None
+                name = None
+                for line in f:
+                    if line.startswith('PPid:'):
+                        ppid = int(line.split()[1])
+                    if line.startswith('Name:'):
+                        name = line.split()[1].strip()
+
+            if name == 'claude':
+                return pid
+
+            if ppid is None:
+                break
+            pid = ppid
+        except (OSError, ValueError):
+            break
+    return None
+
+
+def get_process_tty(pid: int) -> Optional[str]:
+    """Get the TTY for a given process."""
+    try:
+        return os.readlink(f'/proc/{pid}/fd/0')
+    except OSError:
+        return None
+
+
 def find_current_session(cwd: Optional[str] = None) -> Optional[Path]:
     """
     Find the most recent session file for the given working directory.
@@ -413,6 +451,58 @@ def resolve_pin_targets(
     return pin_targets
 
 
+def create_stub_for_image(
+    block: dict,
+    pin_level: str = 'none',
+    pin_reason: str = '',
+    session_path: str = ''
+) -> dict:
+    """
+    Cache image data and return stub source dict.
+
+    Returns a modified source dict with CCM stub instead of base64 data.
+    """
+    source = block.get('source', {})
+    media_type = source.get('media_type', 'image/png')
+    data = source.get('data', '')
+
+    if not CCM_AVAILABLE or not data:
+        return {
+            'type': 'text',
+            'text': f'[IMAGE CACHED - {len(data)} bytes, {media_type}]\nCCM not available.'
+        }
+
+    init_ccm_cache()
+
+    src_info = {
+        'type': 'image',
+        'media_type': media_type,
+        'session_path': session_path,
+    }
+
+    key = store_content(
+        data,
+        source=src_info,
+        pin_level=pin_level,
+        pin_reason=pin_reason
+    )
+
+    # Return a text block with the stub (images can't contain arbitrary text)
+    # Extract format from media_type (e.g., "image/png" -> "PNG")
+    img_format = media_type.split('/')[-1].upper() if '/' in media_type else media_type
+    stub_text = f"""[CCM_CACHED]
+key: {key}
+source: Image ({img_format})
+bytes: {len(data)}
+pinned: {pin_level}
+[/CCM_CACHED]"""
+
+    return {
+        'type': 'text',
+        'text': stub_text
+    }
+
+
 def create_stub_for_tool_result(
     block: dict,
     content: str,
@@ -420,7 +510,10 @@ def create_stub_for_tool_result(
     pin_reason: str = '',
     tool_name: str = 'unknown',
     exit_code: int = 0,
-    session_path: str = ''
+    session_path: str = '',
+    file_path: str = '',
+    command: str = '',
+    description: str = ''
 ) -> str:
     """
     Cache tool_result content and return stub string.
@@ -438,6 +531,10 @@ def create_stub_for_tool_result(
         'exit_code': exit_code,
         'session_path': session_path,
     }
+    if file_path:
+        source['file_path'] = file_path
+    if command:
+        source['command'] = command
 
     key = store_content(
         content,
@@ -447,7 +544,13 @@ def create_stub_for_tool_result(
     )
 
     lines = content.count('\n')
-    stub = build_ccm_stub(key, len(content), lines, exit_code, pin_level)
+    stub = build_ccm_stub(
+        key, len(content), lines, exit_code, pin_level,
+        tool_name=tool_name,
+        file_path=file_path,
+        command=command,
+        description=description
+    )
 
     return stub
 
@@ -679,9 +782,10 @@ def purge_session(
     Returns statistics about changes made.
     """
     results = {
-        'thinking_emptied': 0,
+        'thinking_removed': 0,
         'tool_results_stubbed': 0,
         'tool_results_truncated': 0,
+        'images_stubbed': 0,
         'bytes_saved': 0,
         'bytes_cached': 0,
         'parent_links_repaired': 0,
@@ -734,6 +838,54 @@ def purge_session(
     if verbose and results['tool_pairs_repaired']:
         print(f"  Repaired {results['tool_pairs_repaired']} orphaned blocks")
 
+    # Handle thinking blocks (API rejects empty ones and requires consistency)
+    if verbose:
+        print("Checking thinking blocks...")
+
+    # First pass: check if any assistant message lacks a thinking block at start
+    has_inconsistent_thinking = False
+    for i, (obj, _) in enumerate(lines):
+        if not obj or obj.get('type') != 'assistant':
+            continue
+        content = obj.get('message', {}).get('content', [])
+        if not isinstance(content, list) or not content:
+            continue
+        first_type = content[0].get('type') if isinstance(content[0], dict) else None
+        if first_type not in ('thinking', 'redacted_thinking'):
+            has_inconsistent_thinking = True
+            break
+
+    # Second pass: remove thinking blocks as needed
+    thinking_removed = 0
+    for i, (obj, _) in enumerate(lines):
+        if not obj or obj.get('type') != 'assistant':
+            continue
+        content = obj.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+
+        new_content = []
+        for block in content:
+            if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
+                thinking_text = block.get('thinking', '')
+                is_empty = not thinking_text or thinking_text.strip() in ('', '...')
+                # Remove if empty OR if session has inconsistent thinking
+                if is_empty or has_inconsistent_thinking:
+                    thinking_removed += 1
+                    continue
+            new_content.append(block)
+
+        if len(new_content) != len(content):
+            obj['message']['content'] = new_content
+            lines[i] = (obj, None)  # Mark modified
+
+    results['thinking_removed'] = thinking_removed
+    if verbose:
+        if has_inconsistent_thinking:
+            print(f"  Session has inconsistent thinking blocks - removing all")
+        if thinking_removed:
+            print(f"  Removed {thinking_removed} thinking blocks")
+
     # Parse pin directives
     pin_directives = parse_pin_directives(lines)
     results['pin_directives_found'] = len(pin_directives)
@@ -744,6 +896,61 @@ def purge_session(
     pin_targets = resolve_pin_targets(lines, pin_directives, threshold)
     if verbose and pin_targets:
         print(f"Resolved {len(pin_targets)} pin targets")
+
+    # Build tool_use info map for metadata extraction
+    tool_use_info = {}  # tool_use_id -> {name, file_path, command, description}
+    for i, (obj, _) in enumerate(lines):
+        if not obj or obj.get('type') != 'assistant':
+            continue
+        content = obj.get('message', {}).get('content', [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if isinstance(block, dict) and block.get('type') == 'tool_use':
+                tool_id = block.get('id', '')
+                tool_name = block.get('name', 'unknown')
+                tool_input = block.get('input', {})
+
+                info = {'name': tool_name}
+
+                # Extract relevant metadata based on tool type
+                if tool_name == 'Read':
+                    info['file_path'] = tool_input.get('file_path', '')
+                elif tool_name == 'Edit':
+                    info['file_path'] = tool_input.get('file_path', '')
+                elif tool_name == 'Write':
+                    info['file_path'] = tool_input.get('file_path', '')
+                elif tool_name == 'Bash':
+                    info['command'] = tool_input.get('command', '')
+                    info['description'] = tool_input.get('description', '')
+                elif tool_name == 'Grep':
+                    pattern = tool_input.get('pattern', '')
+                    path = tool_input.get('path', '')
+                    info['description'] = f"pattern={pattern}" + (f" in {path}" if path else "")
+                elif tool_name == 'Glob':
+                    pattern = tool_input.get('pattern', '')
+                    info['description'] = f"pattern={pattern}"
+                elif tool_name == 'WebSearch':
+                    query = tool_input.get('query', '')
+                    info['description'] = f"query={query}"
+                elif tool_name == 'WebFetch':
+                    url = tool_input.get('url', '')
+                    # Truncate long URLs
+                    url_display = url[:60] + '...' if len(url) > 60 else url
+                    info['description'] = url_display
+                elif tool_name == 'NotebookEdit':
+                    info['file_path'] = tool_input.get('notebook_path', '')
+                elif tool_name == 'Task':
+                    # Subagent task - use the description or first part of prompt
+                    desc = tool_input.get('description', '')
+                    prompt = tool_input.get('prompt', '')[:50]
+                    info['description'] = desc or prompt
+
+                if tool_id:
+                    tool_use_info[tool_id] = info
+
+    if verbose and tool_use_info:
+        print(f"Indexed {len(tool_use_info)} tool_use blocks for metadata")
 
     if not repair_only:
         # Process content
@@ -774,27 +981,18 @@ def purge_session(
 
                 block_type = block.get('type')
 
-                # Empty thinking blocks (keep structure, clear content)
-                # Claude requires thinking blocks to exist at start of assistant messages
-                if block_type == 'thinking' and not keep_thinking:
+                # Remove thinking blocks entirely
+                # The API accepts sessions without thinking blocks - removing them
+                # is cleaner than keeping empty/placeholder blocks
+                if block_type in ('thinking', 'redacted_thinking') and not keep_thinking:
                     thinking_len = len(block.get('thinking', ''))
-                    lines_from_end = len(lines) - i
-
-                    # Keep recent thinking blocks intact
-                    if lines_from_end <= recent_lines:
-                        new_content.append(block)
-                        continue
-
-                    # For older thinking: empty but preserve block structure
-                    if thinking_len > 20:
-                        results['thinking_emptied'] += 1
-                        results['bytes_saved'] += thinking_len
+                    if thinking_len > 0:
+                        results['thinking_removed'] += 1
+                        results['bytes_saved'] += thinking_len + 50  # Block overhead
                         modified = True
                         if verbose:
-                            print(f"  Line {i + 1}: Emptying thinking block ({thinking_len} bytes)")
-                        # Empty the thinking but keep the block
-                        block['thinking'] = ''
-                    new_content.append(block)
+                            print(f"  Line {i + 1}: Removing thinking block ({thinking_len} bytes)")
+                    # Skip appending - removes the block entirely
                     continue
 
                 # Handle large tool_results based on position
@@ -817,8 +1015,32 @@ def purge_session(
                         if lines_from_end > recent_lines:
                             # Old tool result - cache to CCM and replace with stub
                             if use_ccm and CCM_AVAILABLE:
-                                # Extract tool info if available
-                                tool_name = 'unknown'
+                                # Look up tool info from corresponding tool_use
+                                tool_use_id = block.get('tool_use_id', '')
+                                tool_info = tool_use_info.get(tool_use_id, {})
+                                tool_name = tool_info.get('name', 'unknown')
+                                file_path = tool_info.get('file_path', '')
+                                command = tool_info.get('command', '')
+                                description = tool_info.get('description', '')
+
+                                # Only cache if we have meaningful metadata
+                                has_context = (
+                                    tool_name != 'unknown' and
+                                    (file_path or command or description)
+                                )
+
+                                if not has_context:
+                                    # No metadata - truncate instead of caching mystery data
+                                    truncated = result_content[:500] + f"\n\n[TRUNCATED - {original_len} bytes, no tool metadata for caching]"
+                                    block['content'] = truncated
+                                    results['tool_results_truncated'] += 1
+                                    results['bytes_saved'] += original_len - len(truncated)
+                                    modified = True
+                                    if verbose:
+                                        print(f"  Line {i + 1}: Truncating (no metadata for caching, {original_len} bytes)")
+                                    new_content.append(block)
+                                    continue
+
                                 exit_code = 0
                                 # Try to parse exit code from content
                                 if 'exit ' in result_content[:100].lower():
@@ -834,7 +1056,10 @@ def purge_session(
                                     pin_reason=pin_reason,
                                     tool_name=tool_name,
                                     exit_code=exit_code,
-                                    session_path=str(filepath)
+                                    session_path=str(filepath),
+                                    file_path=file_path,
+                                    command=command,
+                                    description=description
                                 )
                                 block['content'] = stub
                                 results['tool_results_stubbed'] += 1
@@ -842,8 +1067,9 @@ def purge_session(
                                 results['bytes_saved'] += original_len - len(stub)
                                 modified = True
                                 if verbose:
+                                    source_info = file_path or command[:40] or description[:40]
                                     pin_info = f", pin={pin_level}" if pin_level != 'none' else ""
-                                    print(f"  Line {i + 1}: Stubbed tool_result ({original_len} bytes{pin_info})")
+                                    print(f"  Line {i + 1}: Stubbed {tool_name} ({original_len} bytes{pin_info}) - {source_info}")
                             else:
                                 # Fallback: simple truncation (legacy behavior)
                                 truncated = result_content[:500] + f"\n\n[TRUNCATED - original: {original_len} bytes]"
@@ -862,6 +1088,46 @@ def purge_session(
                             modified = True
                             if verbose:
                                 print(f"  Line {i + 1}: Truncating recent tool_result ({original_len} -> {len(truncated)} bytes)")
+
+                # Handle images - always stub (they're large and base64 encoded)
+                if block_type == 'image':
+                    source = block.get('source', {})
+                    data = source.get('data', '')
+                    if data and len(data) > 1000:  # Stub images > 1KB
+                        original_len = len(data)
+                        lines_from_end = len(lines) - i
+
+                        if lines_from_end > recent_lines:
+                            # Old image - cache and replace with stub
+                            if use_ccm and CCM_AVAILABLE:
+                                stub_block = create_stub_for_image(
+                                    block,
+                                    pin_level=default_pin_level,
+                                    session_path=str(filepath)
+                                )
+                                new_content.append(stub_block)
+                                results['images_stubbed'] += 1
+                                results['bytes_cached'] += original_len
+                                results['bytes_saved'] += original_len - len(stub_block.get('text', ''))
+                                modified = True
+                                if verbose:
+                                    media_type = source.get('media_type', 'unknown')
+                                    print(f"  Line {i + 1}: Stubbed image ({original_len} bytes, {media_type})")
+                                continue  # Don't append original block
+                            else:
+                                # Fallback: replace with text placeholder
+                                media_type = source.get('media_type', 'unknown')
+                                placeholder = {
+                                    'type': 'text',
+                                    'text': f'[IMAGE REMOVED - {original_len} bytes, {media_type}]'
+                                }
+                                new_content.append(placeholder)
+                                results['images_stubbed'] += 1
+                                results['bytes_saved'] += original_len
+                                modified = True
+                                if verbose:
+                                    print(f"  Line {i + 1}: Removed image ({original_len} bytes, {media_type})")
+                                continue
 
                 new_content.append(block)
 
@@ -981,7 +1247,7 @@ Examples:
         dry_run=args.dry_run,
         verbose=args.verbose,
         repair_only=args.repair_only,
-        inject_compaction=not args.no_inject_compaction,
+        inject_compaction=not args.no_inject_compaction and not args.repair_only,
         recent_lines=args.recent_lines,
         default_pin_level=args.pin_level_default,
         use_ccm=not args.no_ccm,
@@ -992,11 +1258,13 @@ Examples:
     if results.get('synthetic_compaction_injected'):
         print("Synthetic compaction: INJECTED (enables full purging)")
     if not args.repair_only:
-        print(f"Thinking blocks emptied: {results['thinking_emptied']}")
+        print(f"Thinking blocks removed: {results['thinking_removed']}")
         if results.get('tool_results_stubbed', 0) > 0:
             print(f"Tool results stubbed (CCM): {results['tool_results_stubbed']} ({results.get('bytes_cached', 0):,} bytes cached)")
         if results.get('tool_results_truncated', 0) > 0:
             print(f"Tool results truncated: {results['tool_results_truncated']}")
+        if results.get('images_stubbed', 0) > 0:
+            print(f"Images stubbed (CCM): {results['images_stubbed']}")
         if results.get('pins_applied', 0) > 0:
             print(f"Pin directives applied: {results['pins_applied']}")
     print(f"Parent links repaired: {results['parent_links_repaired']}")
@@ -1016,71 +1284,19 @@ Examples:
     if args.restart and not args.dry_run:
         import subprocess
 
-        # Find Claude PID - must match CWD to ensure we get the right instance
-        claude_pid = None
-        cwd = os.getcwd()
-        try:
-            result = subprocess.run(['pgrep', '-f', 'claude'], capture_output=True, text=True)
-            pids = [int(p) for p in result.stdout.strip().split('\n') if p]
-            my_pid = os.getpid()
-
-            for pid in pids:
-                if pid == my_pid:
-                    continue
-                try:
-                    # Check if it's a claude binary (node-based)
-                    exe = os.readlink(f'/proc/{pid}/exe')
-                    if 'node' not in exe and 'claude' not in exe:
-                        continue
-
-                    # Check if CWD matches (this is our Claude instance)
-                    proc_cwd = os.readlink(f'/proc/{pid}/cwd')
-                    if proc_cwd == cwd:
-                        claude_pid = pid
-                        break
-                except:
-                    pass
-
-            # Fallback: if no CWD match, try to find by terminal
-            if not claude_pid:
-                my_tty = os.ttyname(sys.stdin.fileno()) if sys.stdin.isatty() else None
-                if my_tty:
-                    for pid in pids:
-                        if pid == my_pid:
-                            continue
-                        try:
-                            proc_tty = os.readlink(f'/proc/{pid}/fd/0')
-                            if proc_tty == my_tty:
-                                claude_pid = pid
-                                break
-                        except:
-                            pass
-        except:
-            pass
+        # Find Claude PID by walking parent chain - most reliable method
+        claude_pid = find_claude_pid_from_parent_chain()
 
         if claude_pid:
             cwd = os.getcwd()
             session_id = session_file.stem
             restart_script = Path(__file__).parent / 'auto-restart.py'
 
-            # Get original cmdline for the Claude process
-            original_args = ''
-            try:
-                cmdline = Path(f'/proc/{claude_pid}/cmdline').read_bytes().decode().split('\0')
-                cmdline = [c for c in cmdline if c]
-                original_args = ':'.join(cmdline)  # Colon-separated to avoid shell issues
-            except:
-                pass
+            # Get TTY from Claude process (hook process won't have one)
+            tty = get_process_tty(claude_pid) or '/dev/tty'
 
             print()
-            print(f"Auto-restart in {args.restart_delay}s (PID {claude_pid})...")
-
-            # Get TTY for output
-            tty = ''
-            try:
-                tty = os.ttyname(sys.stdout.fileno())
-            except:
-                tty = '/dev/tty'
+            print(f"Auto-restart in {args.restart_delay}s (PID {claude_pid}, TTY {tty})...")
 
             subprocess.Popen([
                 sys.executable, str(restart_script),
@@ -1088,7 +1304,6 @@ Examples:
                 '--cwd', cwd,
                 '--delay', str(args.restart_delay),
                 '--session', session_id,
-                '--original-args', original_args,
                 '--tty', tty,
             ], start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         else:

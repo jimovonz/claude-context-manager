@@ -19,10 +19,14 @@ SETTINGS_FILE = CLAUDE_DIR / 'settings.json'
 # Default autocompact threshold in percent (can be changed in config.py)
 DEFAULT_AUTOCOMPACT_THRESHOLD = "80"
 
+# Default launch args for restart after purge
+DEFAULT_LAUNCH_ARGS = "--dangerously-skip-permissions"
+
 # Hook configurations to merge into settings.json
 HOOK_CONFIG = {
     "env": {
-        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD,
+        "CLAUDE_LAUNCH_ARGS": DEFAULT_LAUNCH_ARGS
     },
     "hooks": {
         "Stop": [

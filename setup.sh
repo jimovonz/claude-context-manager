@@ -29,5 +29,5 @@ fi
 if [[ $- == *i* ]]; then
     echo "Claude Code configured:"
     echo "  Alias: c -> claude${SKIP_PERMISSIONS:+ --dangerously-skip-permissions}"
-    echo "  Auto-compact threshold: ${COMPACT_PCT}"
+    echo "  Auto-compact threshold: ${COMPACT_PCT}%"
 fi

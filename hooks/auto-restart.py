@@ -15,16 +15,12 @@ from pathlib import Path
 DELAY_SECONDS = 3
 
 
-def get_claude_cmdline(pid: int) -> list[str]:
-    """Get command line args for a process."""
-    try:
-        cmdline_path = Path(f'/proc/{pid}/cmdline')
-        if cmdline_path.exists():
-            cmdline = cmdline_path.read_bytes().decode().split('\0')
-            return [c for c in cmdline if c]
-    except Exception:
-        pass
-    return []
+def get_claude_cmdline() -> list[str]:
+    """Get command line args from CLAUDE_LAUNCH_ARGS env var."""
+    launch_args = os.environ.get('CLAUDE_LAUNCH_ARGS', '')
+    if launch_args:
+        return ['claude'] + launch_args.split()
+    return ['claude']
 
 
 def get_session_id(cwd: str) -> str:
@@ -59,10 +55,11 @@ def build_resume_cmd(original_args: list[str], session_id: str) -> str:
         if skip_next:
             skip_next = False
             continue
-        if arg in ('--resume', '--continue', '-c'):
-            skip_next = arg == '--resume'
+        # --resume/-r take a session ID argument; --continue/-c do not
+        if arg in ('--resume', '-r', '--continue', '-c'):
+            skip_next = arg in ('--resume', '-r')  # These take an argument to skip
             continue
-        if arg.startswith('--resume='):
+        if arg.startswith('--resume=') or arg.startswith('-r='):
             continue
         cmd_parts.append(arg)
 
@@ -103,12 +100,6 @@ def copy_to_clipboard(text: str) -> bool:
     return False
 
 
-def get_tty() -> str:
-    """Get the TTY of the Claude process."""
-    # Will be passed as argument, but fallback to current
-    return os.ttyname(sys.stdout.fileno()) if sys.stdout.isatty() else '/dev/tty'
-
-
 def main():
     import argparse
     parser = argparse.ArgumentParser()
@@ -116,7 +107,6 @@ def main():
     parser.add_argument('--cwd', required=True, help='Working directory')
     parser.add_argument('--delay', type=int, default=DELAY_SECONDS)
     parser.add_argument('--session', help='Session ID to resume')
-    parser.add_argument('--original-args', help='Original claude command line (colon-separated)')
     parser.add_argument('--tty', help='TTY to write message to')
     args = parser.parse_args()
 
@@ -130,12 +120,8 @@ def main():
     # Wait
     time.sleep(args.delay)
 
-    # Get original args
-    original_args = []
-    if args.original_args:
-        original_args = args.original_args.split(':')
-    else:
-        original_args = get_claude_cmdline(args.pid)
+    # Get launch args from env var (set in ~/.claude/settings.json)
+    original_args = get_claude_cmdline()
 
     # Build resume command
     session_id = args.session or get_session_id(args.cwd)
@@ -144,14 +130,8 @@ def main():
 
     resume_cmd = build_resume_cmd(original_args, session_id)
 
-    # Kill Claude
-    try:
-        os.kill(args.pid, signal.SIGTERM)
-        time.sleep(0.5)
-    except ProcessLookupError:
-        pass
-
-    # Make sure it's dead
+    # Kill Claude with SIGKILL immediately to prevent it from saving
+    # and overwriting our purged session file
     try:
         os.kill(args.pid, signal.SIGKILL)
         time.sleep(0.3)
