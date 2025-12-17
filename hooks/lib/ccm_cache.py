@@ -46,6 +46,7 @@ class CacheMeta(TypedDict):
     key: str  # "sha256:<hex>"
     created_at: str  # ISO format
     last_access_at: str  # ISO format
+    access_count: int  # Number of times content was retrieved
     bytes_uncompressed: int
     lines: int
     compression: Literal['zstd', 'gzip', 'none']
@@ -251,6 +252,7 @@ def store_content(
             'key': key,
             'created_at': now,
             'last_access_at': now,
+            'access_count': 0,
             'bytes_uncompressed': len(content_bytes),
             'lines': lines,
             'compression': compression,
@@ -307,10 +309,11 @@ def retrieve_content(key: str) -> Optional[str]:
         content_bytes = decompress_content(compressed_data, compression)
         content = content_bytes.decode('utf-8')
 
-        # Update access time
+        # Update access time and count
         meta = get_metadata(key)
         if meta:
             meta['last_access_at'] = datetime.now().isoformat()
+            meta['access_count'] = meta.get('access_count', 0) + 1
             _save_metadata(key, meta)
 
         return content
@@ -381,15 +384,19 @@ def build_ccm_stub(
     bytes_uncompressed: int,
     lines: int,
     exit_code: int = 0,
-    pin_level: str = 'none'
+    pin_level: str = 'none',
+    tool_name: str = '',
+    file_path: str = '',
+    command: str = '',
+    description: str = ''
 ) -> str:
     """
-    Build CCM stub format string.
+    Build CCM stub format string with source metadata.
 
     Returns:
         [CCM_CACHED]
         key: sha256:<hex>
-        path: ~/.claude/cache/ccm/blobs/<hex>.zst
+        source: <tool_name> <file_path or command summary>
         bytes: <uncompressed>
         lines: <lines>
         exit: <exit_code>
@@ -397,22 +404,37 @@ def build_ccm_stub(
         [/CCM_CACHED]
     """
     hex_key = _key_to_hex(key)
-    # Find actual blob path
-    result = _find_blob_path(key)
-    if result:
-        blob_path = result[0]
-        path_str = f"~/.claude/cache/ccm/blobs/{blob_path.name}"
-    else:
-        path_str = f"~/.claude/cache/ccm/blobs/{hex_key}.zst"
 
-    return f"""[CCM_CACHED]
-key: {key}
-path: {path_str}
-bytes: {bytes_uncompressed}
-lines: {lines}
-exit: {exit_code}
-pinned: {pin_level}
-[/CCM_CACHED]"""
+    # Build source line from available metadata
+    source_parts = []
+    if tool_name:
+        source_parts.append(tool_name)
+    if file_path:
+        # Shorten home paths
+        if file_path.startswith(str(Path.home())):
+            file_path = '~' + file_path[len(str(Path.home())):]
+        source_parts.append(file_path)
+    elif command:
+        # Truncate long commands
+        cmd_display = command[:80] + '...' if len(command) > 80 else command
+        source_parts.append(cmd_display)
+
+    source_line = ' '.join(source_parts) if source_parts else 'unknown'
+
+    # Build stub
+    stub_lines = ['[CCM_CACHED]']
+    stub_lines.append(f'key: {key}')
+    stub_lines.append(f'source: {source_line}')
+    if description:
+        stub_lines.append(f'desc: {description}')
+    stub_lines.append(f'bytes: {bytes_uncompressed}')
+    stub_lines.append(f'lines: {lines}')
+    if exit_code != 0:
+        stub_lines.append(f'exit: {exit_code}')
+    stub_lines.append(f'pinned: {pin_level}')
+    stub_lines.append('[/CCM_CACHED]')
+
+    return '\n'.join(stub_lines)
 
 
 def parse_ccm_stub(content: str) -> Optional[dict]:
@@ -484,6 +506,10 @@ def get_cache_stats() -> dict:
         'unpinned': int,
         'oldest_access': datetime or None,
         'newest_access': datetime or None,
+        'total_accesses': int,
+        'items_accessed': int,
+        'items_never_accessed': int,
+        'max_access_count': int,
     }
     """
     _ensure_initialized()
@@ -497,6 +523,10 @@ def get_cache_stats() -> dict:
         'unpinned': 0,
         'oldest_access': None,
         'newest_access': None,
+        'total_accesses': 0,
+        'items_accessed': 0,
+        'items_never_accessed': 0,
+        'max_access_count': 0,
     }
 
     for meta_file in CCM_META_DIR.glob('*.json'):
@@ -525,6 +555,17 @@ def get_cache_stats() -> dict:
                         stats['newest_access'] = access_time
                 except ValueError:
                     pass
+
+            # Track access counts
+            access_count = meta.get('access_count', 0)
+            stats['total_accesses'] += access_count
+            if access_count > 0:
+                stats['items_accessed'] += 1
+            else:
+                stats['items_never_accessed'] += 1
+            if access_count > stats['max_access_count']:
+                stats['max_access_count'] = access_count
+
         except (json.JSONDecodeError, OSError):
             continue
 
