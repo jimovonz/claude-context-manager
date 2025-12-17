@@ -25,19 +25,23 @@ Your options:
 
 ## Working With CCM Stubs
 
-After `/purge`, old tool outputs become CCM stubs:
+After `/purge`, old tool outputs become CCM stubs with source metadata:
 ```
 [CCM_CACHED]
 key: sha256:abc123...
-path: ~/.claude/cache/ccm/blobs/abc123.zst
+source: Read ~/.claude/hooks/lib/ccm_cache.py
 bytes: 45678
 lines: 1234
-exit: 0
 pinned: none
 [/CCM_CACHED]
 ```
 
-To retrieve content from a stub:
+The `source:` line tells you what this content is:
+- **Read/Edit/Write**: Shows the file path
+- **Bash**: Shows the command (truncated if long)
+- **Grep/Glob**: Shows the search pattern
+
+**When to retrieve:** If the stub's source is relevant to your current task, retrieve it using:
 ```bash
 ~/.claude/hooks/ccm-get.py sha256:abc123...     # Full content
 ~/.claude/hooks/ccm-get.py sha256:abc123 --info # Metadata only
@@ -66,4 +70,16 @@ These always return full content:
 - `~/.claude/hooks/config.py` - All settings
 - `~/.claude/compact-instructions.txt` - Compaction instructions
 - Full docs: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+
+### Restart After Purge
+
+Set `CLAUDE_LAUNCH_ARGS` in `~/.claude/settings.json` to specify flags for the resume command after `/purge`:
+
+```json
+{
+  "env": {
+    "CLAUDE_LAUNCH_ARGS": "--dangerously-skip-permissions"
+  }
+}
+```
 <!-- CONTEXT-MANAGER-END -->
