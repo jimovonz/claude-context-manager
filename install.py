@@ -22,7 +22,12 @@ DEFAULT_AUTOCOMPACT_THRESHOLD = "80"
 # Default launch args for restart after purge
 DEFAULT_LAUNCH_ARGS = "--dangerously-skip-permissions"
 
+# Thinking proxy configuration
+THINKING_PROXY_PORT = 8080
+
 # Hook configurations to merge into settings.json
+# NOTE: ANTHROPIC_BASE_URL is NOT set here - it's only set by the 'c' function
+# in setup.sh. This ensures normal 'claude' commands work without the proxy.
 HOOK_CONFIG = {
     "env": {
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD,
@@ -83,6 +88,68 @@ def copy_directory(src: Path, dst: Path, description: str) -> int:
             print(f"  {rel_path}")
 
     return count
+
+
+SYSTEMD_SERVICE_TEMPLATE = """[Unit]
+Description=Claude Context Manager Thinking Proxy
+After=network.target
+
+[Service]
+Type=simple
+ExecStart={python} {proxy_path} serve
+Restart=on-failure
+RestartSec=5
+Environment="PATH={path}"
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def setup_systemd_service() -> bool:
+    """Create and enable systemd user service for thinking proxy.
+
+    Returns True if service was set up successfully.
+    """
+    import subprocess
+
+    systemd_user_dir = Path.home() / '.config' / 'systemd' / 'user'
+    service_file = systemd_user_dir / 'ccm-thinking-proxy.service'
+    proxy_path = HOOKS_DIR / 'thinking-proxy.py'
+
+    # Find Python path
+    python = sys.executable
+
+    # Create service file
+    systemd_user_dir.mkdir(parents=True, exist_ok=True)
+    service_content = SYSTEMD_SERVICE_TEMPLATE.format(
+        python=python,
+        proxy_path=proxy_path,
+        path=Path(python).parent
+    )
+    service_file.write_text(service_content)
+    print(f"  Created {service_file}")
+
+    # Reload systemd and enable service
+    try:
+        subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True, capture_output=True)
+        subprocess.run(['systemctl', '--user', 'enable', 'ccm-thinking-proxy.service'],
+                      check=True, capture_output=True)
+        print("  Enabled ccm-thinking-proxy.service")
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        print(f"  Warning: Could not enable systemd service: {e}")
+        print("  You can start the proxy manually with: ~/.claude/hooks/thinking-proxy.py start")
+        return False
+
+
+def check_aiohttp() -> bool:
+    """Check if aiohttp is installed."""
+    try:
+        import aiohttp
+        return True
+    except ImportError:
+        return False
 
 
 def merge_settings(existing: dict, new: dict) -> dict:
@@ -189,6 +256,13 @@ def install():
     print("  ~/.claude/cache/ccm/meta/")
     print()
 
+    # Create proxy state directory
+    print("Initializing proxy state directory...")
+    proxy_state_dir = CLAUDE_DIR / 'proxy-state' / 'no-thinking'
+    proxy_state_dir.mkdir(parents=True, exist_ok=True)
+    print("  ~/.claude/proxy-state/no-thinking/")
+    print()
+
     # Update settings.json
     print("Configuring settings.json...")
     if SETTINGS_FILE.exists():
@@ -206,19 +280,48 @@ def install():
     SETTINGS_FILE.write_text(json.dumps(merged, indent=2) + '\n')
     print("  Done\n")
 
+    # Check aiohttp dependency
+    print("Checking dependencies...")
+    has_aiohttp = check_aiohttp()
+    if has_aiohttp:
+        print("  aiohttp: installed")
+    else:
+        print("  aiohttp: NOT INSTALLED")
+        print("  The thinking proxy requires aiohttp. Install with:")
+        print("    pip install aiohttp")
+    print()
+
+    # Set up systemd service for thinking proxy (Linux only)
+    if sys.platform.startswith('linux') and has_aiohttp:
+        print("Setting up thinking proxy service...")
+        setup_systemd_service()
+        print()
+
     print("=" * 50)
     print("Installation complete!")
     print()
     print("Hooks will activate on next Claude Code session.")
     print()
     print("Quick start:")
-    print("  source ~/.claude/setup.sh  # Enable 'c' alias")
+    print("  source ~/.claude/setup.sh  # Enable 'c' function")
     print("  c                          # Launch with --dangerously-skip-permissions")
+    print()
+    print("Thinking Proxy:")
+    if has_aiohttp:
+        if sys.platform.startswith('linux'):
+            print("  systemctl --user start ccm-thinking-proxy  # Start proxy")
+            print("  systemctl --user status ccm-thinking-proxy # Check status")
+        else:
+            print("  ~/.claude/hooks/thinking-proxy.py start   # Start proxy daemon")
+            print("  ~/.claude/hooks/thinking-proxy.py status  # Check status")
+    else:
+        print("  Install aiohttp first: pip install aiohttp")
+        print("  Then start: ~/.claude/hooks/thinking-proxy.py start")
     print()
     print("Configuration:")
     print("  ~/.claude/hooks/config.py            # All settings")
     print("  ~/.claude/compact-instructions.txt   # Compaction instructions")
-    print("  ~/.claude/setup.sh                   # Shell alias setup")
+    print("  ~/.claude/setup.sh                   # Shell function setup")
     print()
     print("Documentation: ~/.claude/hooks/CONTEXT_MANAGEMENT.md")
     print()

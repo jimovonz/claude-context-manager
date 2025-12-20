@@ -17,7 +17,7 @@ This system intercepts tool calls to manage context proactively:
 1. **Execute in hooks** - Commands run inside hooks, results cached if large
 2. **Return references** - Main agent gets pointers to cached data, not the data itself
 3. **Delegate to subagents** - Task agents access full content without polluting main context
-4. **Purge on demand** - `/purge` command removes thinking blocks and truncates old outputs
+4. **Purge on demand** - `/purge` command truncates old outputs
 
 ## Requirements
 
@@ -141,7 +141,7 @@ For accurate token counting, install tiktoken: `pip install tiktoken`
 ### The `/purge` Command
 
 When context is critical, run `/purge` to:
-- Remove thinking blocks (not needed for continuity)
+- Preserve thinking blocks (for future development)
 - Truncate large tool outputs
 - Repair any structural issues
 
@@ -192,6 +192,46 @@ These always pass through unmodified:
 - `CLAUDE.md`, `README.md` - Project documentation
 - `*.json`, `*.yaml`, `*.yml`, `*.toml` - Configuration
 - `*.lock`, `*.env*` - Lock and environment files
+
+## Thinking Proxy
+
+The thinking proxy is an optional component that manages Claude's thinking blocks on a per-session basis. It allows sessions to benefit from extended thinking until purge, then automatically disables thinking to prevent API consistency errors.
+
+### How It Works
+
+1. **Before purge**: Sessions operate normally with full thinking enabled
+2. **After `/purge`**: The session is flagged for no-thinking mode
+3. **On resume**: The proxy strips thinking from requests/responses for that session
+
+### Starting the Proxy
+
+```bash
+# Linux (systemd)
+systemctl --user start ccm-thinking-proxy
+systemctl --user enable ccm-thinking-proxy  # Start on login
+
+# Manual (any platform)
+~/.claude/hooks/thinking-proxy.py start   # Start daemon
+~/.claude/hooks/thinking-proxy.py status  # Check status
+~/.claude/hooks/thinking-proxy.py stop    # Stop daemon
+```
+
+### Requirements
+
+The proxy requires aiohttp:
+```bash
+pip install aiohttp
+```
+
+### Disabling the Proxy
+
+To bypass the proxy temporarily:
+```bash
+unset ANTHROPIC_BASE_URL
+claude
+```
+
+Or set `USE_THINKING_PROXY=false` before sourcing setup.sh.
 
 ## Troubleshooting
 

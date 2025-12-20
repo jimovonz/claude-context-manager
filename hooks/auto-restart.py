@@ -46,10 +46,15 @@ def get_session_id(cwd: str) -> str:
 
 
 def build_resume_cmd(original_args: list[str], session_id: str) -> str:
-    """Build resume command preserving original flags."""
-    cmd_parts = ['claude']
+    """Build resume command preserving original flags.
 
-    # Preserve flags from original command (skip 'claude' itself and any --resume/--continue)
+    Uses 'c' function (from setup.sh) which handles session ID header injection
+    for the thinking proxy. Falls back to 'claude' if c function unavailable.
+    """
+    # Use 'c' function to ensure session header is injected for thinking proxy
+    cmd_parts = ['c']
+
+    # Preserve flags from original command (skip 'claude'/'c' itself and any --resume/--continue)
     skip_next = False
     for arg in original_args[1:]:
         if skip_next:
@@ -60,6 +65,9 @@ def build_resume_cmd(original_args: list[str], session_id: str) -> str:
             skip_next = arg in ('--resume', '-r')  # These take an argument to skip
             continue
         if arg.startswith('--resume=') or arg.startswith('-r='):
+            continue
+        # Skip --dangerously-skip-permissions as 'c' function adds it
+        if arg == '--dangerously-skip-permissions':
             continue
         cmd_parts.append(arg)
 

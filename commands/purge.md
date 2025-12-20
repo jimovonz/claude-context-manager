@@ -1,4 +1,4 @@
-Run the session purge tool to reduce context usage by removing thinking blocks and truncating large tool outputs.
+Run the session purge tool to reduce context usage by truncating large tool outputs.
 
 Execute:
 ```bash

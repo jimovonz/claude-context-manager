@@ -154,7 +154,7 @@ When context reaches critical levels, run `/purge` to reduce session file size:
 ```
 
 **What it does:**
-- Removes thinking blocks (internal reasoning, not needed for continuity)
+- Preserves thinking blocks (for future development)
 - Truncates large tool outputs (keeps first 500 bytes + marker)
 - Repairs broken `parentUuid` chains
 - Repairs orphaned `tool_use`/`tool_result` pairs
@@ -165,7 +165,7 @@ When context reaches critical levels, run `/purge` to reduce session file size:
 --analyze          # Show stats without changes
 --repair-only      # Fix structural issues only
 --threshold N      # Truncate outputs > N bytes (default: 5000)
---keep-thinking    # Preserve thinking blocks
+--remove-thinking  # Remove thinking blocks (disabled by default)
 --dry-run          # Preview changes
 ```
 

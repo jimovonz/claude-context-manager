@@ -5,7 +5,7 @@ Context Manager (CCM) command. Parse the argument to determine the action:
 ## Actions
 
 ### `--purge` or `-p`
-Reduce context usage by removing thinking blocks and truncating/caching large tool outputs.
+Reduce context usage by truncating/caching large tool outputs.
 
 Execute:
 ```bash

@@ -767,7 +767,7 @@ def repair_tool_pairing(lines: list[tuple[Optional[dict], str]], verbose: bool =
 def purge_session(
     filepath: Path,
     threshold: int = 5000,
-    keep_thinking: bool = False,
+    keep_thinking: bool = True,
     dry_run: bool = False,
     verbose: bool = False,
     repair_only: bool = False,
@@ -818,12 +818,6 @@ def purge_session(
             results['synthetic_compaction_injected'] = True
             has_compaction = True  # Now we have compaction
 
-    if not has_compaction and not keep_thinking:
-        if verbose:
-            print("Note: No compaction summary - preserving thinking blocks (only truncating tool_results)")
-            print("      Use --inject-compaction to enable full purging")
-        keep_thinking = True  # Force safe mode for non-compacted sessions
-
     # Repair parent chain first
     if verbose:
         print("Repairing parentUuid chain...")
@@ -838,53 +832,10 @@ def purge_session(
     if verbose and results['tool_pairs_repaired']:
         print(f"  Repaired {results['tool_pairs_repaired']} orphaned blocks")
 
-    # Handle thinking blocks (API rejects empty ones and requires consistency)
-    if verbose:
-        print("Checking thinking blocks...")
-
-    # First pass: check if any assistant message lacks a thinking block at start
-    has_inconsistent_thinking = False
-    for i, (obj, _) in enumerate(lines):
-        if not obj or obj.get('type') != 'assistant':
-            continue
-        content = obj.get('message', {}).get('content', [])
-        if not isinstance(content, list) or not content:
-            continue
-        first_type = content[0].get('type') if isinstance(content[0], dict) else None
-        if first_type not in ('thinking', 'redacted_thinking'):
-            has_inconsistent_thinking = True
-            break
-
-    # Second pass: remove thinking blocks as needed
-    thinking_removed = 0
-    for i, (obj, _) in enumerate(lines):
-        if not obj or obj.get('type') != 'assistant':
-            continue
-        content = obj.get('message', {}).get('content', [])
-        if not isinstance(content, list):
-            continue
-
-        new_content = []
-        for block in content:
-            if isinstance(block, dict) and block.get('type') in ('thinking', 'redacted_thinking'):
-                thinking_text = block.get('thinking', '')
-                is_empty = not thinking_text or thinking_text.strip() in ('', '...')
-                # Remove if empty OR if session has inconsistent thinking
-                if is_empty or has_inconsistent_thinking:
-                    thinking_removed += 1
-                    continue
-            new_content.append(block)
-
-        if len(new_content) != len(content):
-            obj['message']['content'] = new_content
-            lines[i] = (obj, None)  # Mark modified
-
-    results['thinking_removed'] = thinking_removed
-    if verbose:
-        if has_inconsistent_thinking:
-            print(f"  Session has inconsistent thinking blocks - removing all")
-        if thinking_removed:
-            print(f"  Removed {thinking_removed} thinking blocks")
+    # NOTE: Thinking block removal is disabled - all thinking blocks are preserved
+    # This functionality will be used in later development
+    # The keep_thinking parameter defaults to True and the first-pass removal logic
+    # has been removed. The second-pass logic (in content processing) respects keep_thinking.
 
     # Parse pin directives
     pin_directives = parse_pin_directives(lines)
@@ -1159,6 +1110,16 @@ def purge_session(
                 f.write('\n')
 
     results['new_size'] = filepath.stat().st_size
+
+    # Signal thinking proxy: enable no-thinking mode for this session
+    # This creates a flag file that the proxy checks to strip thinking blocks
+    session_id = filepath.stem
+    state_dir = Path.home() / '.claude' / 'proxy-state' / 'no-thinking'
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / session_id).touch()
+    if verbose:
+        print(f"Flagged session {session_id} for no-thinking mode")
+
     return results
 
 
@@ -1179,7 +1140,7 @@ Examples:
     parser.add_argument('--analyze', action='store_true', help='Analyze file without making changes')
     parser.add_argument('--repair-only', action='store_true', help='Only repair structural issues, no purging')
     parser.add_argument('--threshold', type=int, default=5000, help='Truncate tool outputs larger than this (default: 5000)')
-    parser.add_argument('--keep-thinking', action='store_true', help="Don't remove thinking blocks")
+    parser.add_argument('--remove-thinking', action='store_true', help="Remove thinking blocks (disabled by default, reserved for future use)")
     parser.add_argument('--no-inject-compaction', action='store_true',
                         help='Disable automatic synthetic compaction injection (by default, sessions without compaction get one injected to enable full purging)')
     parser.add_argument('--recent-lines', type=int, default=20,
@@ -1243,7 +1204,7 @@ Examples:
     results = purge_session(
         session_file,
         threshold=args.threshold,
-        keep_thinking=args.keep_thinking,
+        keep_thinking=not args.remove_thinking,
         dry_run=args.dry_run,
         verbose=args.verbose,
         repair_only=args.repair_only,

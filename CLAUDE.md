@@ -56,7 +56,7 @@ Main agent calls are intercepted; **subagent (Task) calls pass through unmodifie
 
 ## Commands
 
-- `/purge` - Reduce session size when context is critical (removes thinking blocks, truncates old outputs)
+- `/purge` - Reduce session size when context is critical (truncates old outputs)
 
 ## Files That Bypass Interception
 
@@ -70,6 +70,7 @@ These always return full content:
 - `~/.claude/hooks/config.py` - All settings
 - `~/.claude/compact-instructions.txt` - Compaction instructions
 - Full docs: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+- External compaction design: `docs/EXTERNAL_COMPACTION.md`
 
 ### Restart After Purge
 

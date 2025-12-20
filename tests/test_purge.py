@@ -150,8 +150,8 @@ class TestSessionAnalysis:
 class TestPurgeOperations:
     """Test actual purge operations."""
 
-    def test_removes_thinking_blocks(self):
-        """Should remove thinking blocks when compaction exists."""
+    def test_preserves_thinking_blocks(self):
+        """Should preserve thinking blocks by default (removal disabled)."""
         lines = [
             {'type': 'user', 'uuid': '1', 'isCompactSummary': True, 'message': {'content': []}},
             {
@@ -170,13 +170,14 @@ class TestPurgeOperations:
 
         try:
             results = purge.purge_session(session_file, dry_run=False, verbose=False)
-            assert results['thinking_removed'] >= 1
+            # Thinking removal is disabled by default
+            assert results['thinking_removed'] == 0
 
-            # Verify file was modified
+            # Verify thinking block was preserved
             with open(session_file) as f:
                 content = f.read()
-                # Thinking block should be gone
-                assert 'x' * 1000 not in content
+                # Thinking block should still be there
+                assert 'x' * 1000 in content
                 # Text should remain
                 assert 'answer' in content
         finally:
@@ -312,29 +313,42 @@ class TestCCMStubGeneration:
         # Create session with large tool_result far from end
         lines = [
             {'type': 'user', 'uuid': '1', 'isCompactSummary': True, 'message': {'content': []}},
+            # Assistant with tool_use
+            {
+                'type': 'assistant',
+                'uuid': '2',
+                'parentUuid': '1',
+                'message': {
+                    'content': [{
+                        'type': 'tool_use',
+                        'id': 'toolu_test',
+                        'name': 'Bash',
+                        'input': {'command': 'test'}
+                    }]
+                }
+            },
+            # User with tool_result (large)
+            {
+                'type': 'user',
+                'uuid': '3',
+                'parentUuid': '2',
+                'message': {
+                    'content': [{
+                        'type': 'tool_result',
+                        'tool_use_id': 'toolu_test',
+                        'content': 'Large output ' * 1000  # ~13000 bytes
+                    }]
+                }
+            },
         ]
         # Add many messages to push tool_result far from end
         for i in range(30):
             lines.append({
                 'type': 'assistant' if i % 2 == 0 else 'user',
-                'uuid': str(i + 2),
-                'parentUuid': str(i + 1),
+                'uuid': str(i + 10),
+                'parentUuid': str(i + 9) if i > 0 else '3',
                 'message': {'content': [{'type': 'text', 'text': f'message {i}'}]}
             })
-
-        # Insert large tool_result early
-        lines.insert(2, {
-            'type': 'user',
-            'uuid': '2a',
-            'parentUuid': '1',
-            'message': {
-                'content': [{
-                    'type': 'tool_result',
-                    'tool_use_id': 'toolu_test',
-                    'content': 'Large output ' * 1000  # ~13000 bytes
-                }]
-            }
-        })
 
         session_file = create_test_session(lines)
 
@@ -360,10 +374,25 @@ class TestCCMStubGeneration:
         """Recent tool_results should be truncated, not stubbed."""
         lines = [
             {'type': 'user', 'uuid': '1', 'isCompactSummary': True, 'message': {'content': []}},
+            # Assistant with tool_use
             {
-                'type': 'user',
+                'type': 'assistant',
                 'uuid': '2',
                 'parentUuid': '1',
+                'message': {
+                    'content': [{
+                        'type': 'tool_use',
+                        'id': 'toolu_recent',
+                        'name': 'Bash',
+                        'input': {'command': 'test'}
+                    }]
+                }
+            },
+            # User with tool_result (large)
+            {
+                'type': 'user',
+                'uuid': '3',
+                'parentUuid': '2',
                 'message': {
                     'content': [{
                         'type': 'tool_result',
