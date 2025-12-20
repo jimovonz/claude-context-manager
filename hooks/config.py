@@ -66,17 +66,154 @@ AUTOCOMPACT_THRESHOLD = 80
 # Enable/disable PreCompact hook
 PRE_COMPACT_ENABLED = True
 
-# Default compaction instructions (used if ~/.claude/compact-instructions.txt doesn't exist)
-COMPACT_INSTRUCTIONS = """Focus on preserving:
-- Current task context and objectives
-- Key decisions made and their rationale
-- Important file paths and code locations discovered
-- Any pending actions or TODOs
-- Error messages and debugging context being investigated
-- Critical state (connections, configurations, credentials referenced)
+# Two-pass distillation prompts
+# Pass 1: Extract/update execution artefacts (delta mode)
+# Pass 2: Generate full distillation using Pass 1 artefacts
 
-Summarize completed work concisely. Prioritize actionable context over historical details.
-Maintain enough context to continue the current task without re-reading files."""
+COMPACT_INSTRUCTIONS_PASS1 = """ARTEFACT EXTRACTION (Pass 1)
+
+Extract all execution-critical artefacts from this conversation.
+Output ONLY artefacts, no narrative, no summary.
+
+VERBATIM ZONES (mandatory):
+For any shell command, build invocation, error message, stack trace, config
+line, or path: copy it VERBATIM (no edits, no reordering flags, no cleanup).
+Use code fences for commands and errors.
+
+OUTPUT STRUCTURE:
+```
+REPO ROOTS:
+- /path/to/repo — purpose tag (3-8 words)
+
+KEY FILES:
+- /path/to/file.py — purpose tag
+
+ENTRY POINTS:
+- script.sh — purpose tag
+- service:port — purpose tag
+
+COMMANDS:
+build:
+  ```
+  exact command here
+  ```
+test:
+  ```
+  exact command here
+  ```
+run:
+  ```
+  exact command here
+  ```
+
+ACCESS:
+local:
+  - host/method — purpose
+dev:
+  - host/method — purpose
+
+ERRORS (verbatim):
+  ```
+  exact error text
+  ```
+```
+
+RULES:
+- Each artefact gets a 3-8 word purpose tag
+- Merge duplicates: one canonical, variants as sub-bullets
+- If two items are similar but DISTINCT, keep them separate
+- Commands/errors MUST be in code fences, verbatim
+- Do NOT generalise, normalise, or "clean up" anything
+
+DELTA MODE (if PREVIOUS ARTEFACTS provided below):
+Output only: (a) NEW, (b) REMOVED, (c) CHANGED
+For unchanged items: "STABLE: [brief list]"
+If nothing changed: "NO CHANGE"
+
+PREVIOUS ARTEFACTS:
+{previous_artefacts}
+
+---
+CONVERSATION TO EXTRACT FROM:
+"""
+
+COMPACT_INSTRUCTIONS_PASS2 = """DISTILLATION (Pass 2)
+
+Generate a context distillation for agent continuity.
+You are given ARTEFACTS (already extracted) and the conversation.
+
+This is NOT a summary. This is execution-critical state preservation.
+
+ACTIVE THREAD SELECTION:
+- ONE primary objective (current focus)
+- Up to TWO secondary threads (if actively relevant)
+- Everything else → DEAD ENDS
+
+OUTPUT STRUCTURE (truncation-resilient order):
+1. CURRENT OBJECTIVE
+   Primary: [one sentence]
+   Secondary: [optional, max 2]
+
+2. OPEN TASKS / TODOs
+   - [ ] task with enough context to execute
+   - [ ] next task
+
+3. EXECUTION ARTEFACTS
+   [Insert Pass 1 artefacts here]
+
+4. DECISIONS & CONSTRAINTS
+   - Decision made — why, what was rejected
+
+5. CURRENT STATE
+   - What's done vs in-progress
+
+6. ERRORS / DIAGNOSTICS (if any)
+   [verbatim in code fences]
+
+7. DEAD ENDS
+   - Parked thread — one line why
+
+SELF-AUDIT (append at end):
+```
+CHECKS: commands[Y/N] paths[Y/N] errors-quoted[Y/N] TODOs[Y/N]
+```
+
+BUDGET ENFORCEMENT:
+If over budget:
+1. Remove narration first
+2. Compress DEAD ENDS to one-liners
+3. NEVER remove: artefacts, constraints, TODOs, verbatim errors
+
+CRITICAL:
+If truncated, sections 1-3 (objective, TODOs, artefacts) MUST appear first.
+
+Target output size: <N tokens.
+
+ARTEFACTS FROM PASS 1:
+{pass1_artefacts}
+
+---
+CONVERSATION:
+"""
+
+# Legacy single-pass (deprecated, kept for compatibility)
+COMPACT_INSTRUCTIONS = COMPACT_INSTRUCTIONS_PASS2.replace("{pass1_artefacts}", "[Extract inline]").replace("{previous_artefacts}", "None")
+
+# File-based override
+_COMPACT_INSTRUCTIONS_FILE = Path.home() / '.claude' / 'compact-instructions.txt'
+
+def _load_compact_instructions():
+    """Load from file if exists, else use default."""
+    if _COMPACT_INSTRUCTIONS_FILE.exists():
+        return _COMPACT_INSTRUCTIONS_FILE.read_text().strip()
+    return COMPACT_INSTRUCTIONS
+
+# Re-export for imports expecting single COMPACT_INSTRUCTIONS
+COMPACT_INSTRUCTIONS = _load_compact_instructions()
+
+# Also export pass-specific instructions
+__all__ = ['COMPACT_INSTRUCTIONS', 'COMPACT_INSTRUCTIONS_PASS1', 'COMPACT_INSTRUCTIONS_PASS2']
+
 
 # =============================================================================
 # CCM (Content Cache Manager) Settings
@@ -100,3 +237,68 @@ CCM_STUB_THRESHOLD_BYTES = 5000
 
 # Recent lines window: tool_results within this many lines of end are kept
 CCM_RECENT_LINES_WINDOW = 20
+
+# =============================================================================
+# Thinking Proxy Settings
+# =============================================================================
+
+# Enable thinking proxy (requires ANTHROPIC_BASE_URL to be set)
+THINKING_PROXY_ENABLED = True
+
+# Port for the proxy to listen on
+THINKING_PROXY_PORT = 8080
+
+# Enable debug logging (writes detailed request/response info to proxy-debug.log)
+THINKING_PROXY_DEBUG_LOG = False
+
+# =============================================================================
+# External Compaction Settings
+# =============================================================================
+
+import os
+import json
+
+# Enable external compaction routing (routes /compact to external LLM)
+EXTERNAL_COMPACTION_ENABLED = True
+
+# OpenRouter API key (from credentials file or environment)
+def _load_openrouter_key():
+    """Load OpenRouter API key from credentials file or environment."""
+    # Try credentials file first
+    creds_file = Path.home() / '.claude' / 'credentials.json'
+    if creds_file.exists():
+        try:
+            creds = json.loads(creds_file.read_text())
+            key = creds.get('openrouter', {}).get('api_key')
+            if key:
+                return key
+        except (json.JSONDecodeError, KeyError):
+            pass
+    # Fall back to environment variable
+    return os.environ.get('OPENROUTER_API_KEY')
+
+OPENROUTER_API_KEY = _load_openrouter_key()
+
+# OpenRouter API base URL
+OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1'
+
+# Model selection by compaction number (OpenRouter model IDs)
+# Early compactions (1-5): cheaper model with generous output
+# Late compactions (6+): more capable model for dense content
+COMPACTION_MODELS = {
+    'early': 'x-ai/grok-4.1-fast',   # Compactions 1-5
+    'late': 'x-ai/grok-4.1-fast',    # Compactions 6+
+}
+
+# Output token limits per compaction number (tight early, generous late)
+# Early: content is verbose, easy to compress
+# Late: content is dense, needs more tokens to preserve
+COMPACTION_MAX_TOKENS = {
+    1: 20000,
+    2: 36000,
+    3: 52000,
+    4: 68000,
+    5: 84000,
+    # Later compactions: content is very dense, need maximum budget
+    'default': 100000
+}
