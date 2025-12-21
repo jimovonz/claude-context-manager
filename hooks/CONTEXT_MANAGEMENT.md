@@ -307,30 +307,40 @@ rm -rf ~/.claude/cache/*
 
 Hooks must be registered in `~/.claude/settings.json` to be active. Placing files in `~/.claude/hooks/` alone does nothing.
 
-## Quick Launch with 'c' Alias
+## Quick Launch with 'c' Command
 
-After installation, enable the quick-launch alias:
+The installer creates a `c` command at `~/.local/bin/c`:
 
 ```bash
-source ~/.claude/setup.sh
-c  # Launches claude --dangerously-skip-permissions
+c                           # Launch claude with proxy
+c --resume abc123           # Resume a session
+c -p "do something"         # Run with prompt
 ```
 
-To make permanent, add to `~/.bashrc` or `~/.zshrc`:
+If `~/.local/bin` is not in your PATH, add to `~/.bashrc` or `~/.zshrc`:
 ```bash
-source ~/.claude/setup.sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
-Or just add the alias directly:
-```bash
-alias c='claude --dangerously-skip-permissions'
-```
+### What 'c' Does
 
-### Configuration via setup.sh
+1. Starts the thinking proxy (if not running)
+2. Runs `claude` with env vars scoped to that process only:
+   - `ANTHROPIC_BASE_URL` - Routes through proxy
+   - `ANTHROPIC_CUSTOM_HEADERS` - Session ID for tracking
+   - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` - Compaction threshold
+3. Adds `--dangerously-skip-permissions`
+
+No terminal pollution - env vars only exist for the claude process.
+
+### Configuration
+
+Override defaults with env vars:
 
 ```bash
-COMPACT_PCT=70 source ~/.claude/setup.sh   # Custom compact threshold (percent)
-SKIP_PERMISSIONS=false source ~/.claude/setup.sh  # Disable skip-permissions
+COMPACT_PCT=70 c                    # Different threshold
+SKIP_PERMISSIONS=false c            # Prompt for permissions
+THINKING_PROXY_PORT=9000 c          # Different port
 ```
 
 ## Auto-Compaction Control
