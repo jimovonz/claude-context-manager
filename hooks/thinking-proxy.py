@@ -41,8 +41,7 @@ try:
         COMPACTION_MODELS,
         COMPACTION_MAX_TOKENS,
         COMPACT_INSTRUCTIONS,
-        COMPACT_INSTRUCTIONS_PASS1,
-        COMPACT_INSTRUCTIONS_PASS2,
+        COMPACT_INSTRUCTIONS_SINGLE_PASS,
     )
 except ImportError:
     THINKING_PROXY_PORT = 8080
@@ -55,8 +54,7 @@ except ImportError:
     COMPACT_INSTRUCTIONS = """Summarize this conversation for context continuity.
 Preserve: current task, key decisions, file paths, pending actions, errors being investigated.
 Be concise. Prioritize actionable context over history."""
-    COMPACT_INSTRUCTIONS_PASS1 = COMPACT_INSTRUCTIONS
-    COMPACT_INSTRUCTIONS_PASS2 = COMPACT_INSTRUCTIONS
+    COMPACT_INSTRUCTIONS_SINGLE_PASS = COMPACT_INSTRUCTIONS
 
 # Paths
 CLAUDE_DIR = Path.home() / '.claude'
@@ -512,14 +510,19 @@ class ExternalCompactionHandler:
         """
         return COMPACTION_MAX_TOKENS.get(compaction_num, COMPACTION_MAX_TOKENS['default'])
 
+    # OpenRouter has a 1MB request body limit
+    MAX_REQUEST_BYTES = 900_000  # Leave headroom for JSON overhead
+
     def claude_to_openai(self, body: dict, model: str, max_tokens: int,
-                          system_prompt: str = None, stream: bool = True) -> dict:
+                          system_prompt: str = None, stream: bool = True,
+                          artefacts: str = None, flatten_conversation: bool = False) -> dict:
         """Transform Claude request to OpenAI/OpenRouter format.
 
         Optimizations for compaction:
         - Skip Claude's system prompt (use custom compaction instructions)
         - Strip metadata (cache_control, timestamps, UUIDs)
         - Tool results left as-is (already summarized by CCM hooks)
+        - Truncate old messages if request exceeds OpenRouter's 1MB limit
         """
         messages = self.strip_thinking_from_messages(body.get('messages', []))
 
@@ -539,25 +542,17 @@ class ExternalCompactionHandler:
                 'content': instructions
             })
 
-        # Convert conversation messages - extract only role + text content
-        # Skip all metadata: uuid, timestamp, thinkingMetadata, cache_control, etc.
-        for msg in messages:
-            role = msg['role']
+        # Helper to extract text from a message
+        def extract_text(msg):
             content = msg.get('content', [])
-
-            # Flatten content blocks to plain text only
             if isinstance(content, list):
                 text_parts = []
                 for block in content:
                     if isinstance(block, dict):
                         block_type = block.get('type', '')
-
                         if block_type == 'text':
-                            # Text block: extract text only, skip cache_control/citations
                             text_parts.append(block.get('text', ''))
-
                         elif block_type == 'tool_use':
-                            # Tool call: compact single-line representation
                             name = block.get('name', 'unknown')
                             inp = block.get('input', {})
                             if 'file_path' in inp:
@@ -571,16 +566,11 @@ class ExternalCompactionHandler:
                                 text_parts.append(f"[{name}: {inp['query'][:80]}]")
                             elif 'url' in inp:
                                 text_parts.append(f"[{name}: {inp['url']}]")
-                            elif 'prompt' in inp:
-                                text_parts.append(f"[{name}]")
                             else:
                                 text_parts.append(f"[{name}]")
-
                         elif block_type == 'tool_result':
-                            # Tool result: extract text content only
                             result_content = block.get('content', '')
                             if isinstance(result_content, list):
-                                # Extract only text from content blocks
                                 texts = [b.get('text', '') for b in result_content
                                         if isinstance(b, dict) and b.get('type') == 'text']
                                 result_text = '\n'.join(texts)
@@ -590,26 +580,91 @@ class ExternalCompactionHandler:
                                 result_text = ''
                             if result_text:
                                 text_parts.append(result_text)
-
-                        # Explicitly skip: image, document, thinking, redacted_thinking
-                        # Any other block type is silently dropped
-
                     elif isinstance(block, str):
                         text_parts.append(block)
-
-                text = '\n'.join(filter(None, text_parts))
+                return '\n'.join(filter(None, text_parts))
             else:
-                text = str(content) if content else ''
+                return str(content) if content else ''
 
-            if text.strip():
-                openai_messages.append({'role': role, 'content': text})
+        if flatten_conversation and artefacts:
+            # Pass 2 mode: Build single user message with artefacts + flattened conversation
+            conversation_parts = []
+            for msg in messages:
+                role = msg['role'].upper()
+                text = extract_text(msg)
+                if text.strip():
+                    conversation_parts.append(f"[{role}]\n{text}")
 
-        return {
+            flattened = '\n\n'.join(conversation_parts)
+
+            user_content = f"""=== PASS 1 ARTEFACTS ===
+{artefacts}
+
+=== CONVERSATION TO DISTILL ===
+The following is the raw conversation transcript. Each message is prefixed with [USER] or [ASSISTANT].
+Extract and distill this into the OUTPUT STRUCTURE specified in your instructions.
+
+{flattened}
+
+=== END OF CONVERSATION ===
+
+Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."""
+
+            openai_messages.append({'role': 'user', 'content': user_content})
+        else:
+            # Standard mode: Convert to role/content format
+            for msg in messages:
+                role = msg['role']
+                text = extract_text(msg)
+                if text.strip():
+                    openai_messages.append({'role': role, 'content': text})
+
+        # Build initial request
+        request = {
             'model': model,
             'messages': openai_messages,
             'max_tokens': max_tokens,
             'stream': stream
         }
+
+        # Check size and truncate if needed
+        request_size = len(json.dumps(request))
+        if request_size > self.MAX_REQUEST_BYTES:
+            logger.warning(f"Request size {request_size} exceeds limit {self.MAX_REQUEST_BYTES}, truncating...")
+
+            # Keep system prompt (first message) and truncate from the beginning of conversation
+            system_msg = openai_messages[0] if openai_messages else None
+            conv_messages = openai_messages[1:] if len(openai_messages) > 1 else []
+
+            # Calculate how much we need to cut
+            system_size = len(json.dumps(system_msg)) if system_msg else 0
+            overhead = len(json.dumps({'model': model, 'max_tokens': max_tokens, 'stream': stream, 'messages': []}))
+            available = self.MAX_REQUEST_BYTES - system_size - overhead - 1000  # Extra buffer
+
+            # Truncate from beginning, keeping recent messages
+            truncated = []
+            current_size = 0
+            for msg in reversed(conv_messages):
+                msg_size = len(json.dumps(msg))
+                if current_size + msg_size > available:
+                    break
+                truncated.insert(0, msg)
+                current_size += msg_size
+
+            # Add truncation notice at start
+            if len(truncated) < len(conv_messages):
+                dropped = len(conv_messages) - len(truncated)
+                notice = {'role': 'user', 'content': f'[...{dropped} earlier messages truncated for size...]'}
+                truncated.insert(0, notice)
+
+            # Rebuild messages
+            openai_messages = [system_msg] + truncated if system_msg else truncated
+            request['messages'] = openai_messages
+
+            new_size = len(json.dumps(request))
+            logger.info(f"Truncated request: {request_size} -> {new_size} bytes, kept {len(truncated)}/{len(conv_messages)} messages")
+
+        return request
 
     def _message_start_event(self) -> bytes:
         """Generate Claude message_start SSE event."""
@@ -665,60 +720,41 @@ class ExternalCompactionHandler:
         event = {'type': 'message_stop'}
         return f'event: message_stop\ndata: {json.dumps(event)}\n\n'.encode()
 
-    async def run_pass1(self, body: dict, model: str, session_id: str,
-                         aiohttp_session) -> str:
-        """Run Pass 1: Extract artefacts (non-streaming).
+    def extract_artefacts_from_output(self, output: str) -> str:
+        """Extract the ARTEFACTS section from single-pass output.
 
-        Returns the artefacts text extracted from the conversation.
+        Looks for content between "## ARTEFACTS" and "## DISTILLATION".
+        Returns the artefacts text for storage and appending.
         """
-        # Get previous artefacts for delta mode
-        prev_artefacts = self.previous_artefacts.get(session_id, 'None (first compaction)')
+        import re
 
-        # Build Pass 1 prompt with previous artefacts
-        pass1_prompt = COMPACT_INSTRUCTIONS_PASS1.replace('{previous_artefacts}', prev_artefacts)
+        # Try to find artefacts section
+        patterns = [
+            r'## ARTEFACTS\s*\n(.*?)(?=## DISTILLATION|\Z)',
+            r'ARTEFACTS:?\s*\n(.*?)(?=DISTILLATION|\Z)',
+            r'# ARTEFACTS\s*\n(.*?)(?=# DISTILLATION|\Z)',
+        ]
 
-        # Build request (non-streaming)
-        request = self.claude_to_openai(body, model, max_tokens=20000,
-                                         system_prompt=pass1_prompt, stream=False)
+        for pattern in patterns:
+            match = re.search(pattern, output, re.DOTALL | re.IGNORECASE)
+            if match:
+                artefacts = match.group(1).strip()
+                if len(artefacts) > 100:  # Sanity check
+                    return artefacts
 
-        logger.debug(f"Pass 1 request for session {session_id}")
+        # Fallback: if structured extraction fails, return first half as artefacts
+        # (since we ask for artefacts first)
+        if len(output) > 1000:
+            mid = len(output) // 2
+            return output[:mid]
 
-        async with aiohttp_session.post(
-            f'{self.api_base}/chat/completions',
-            headers={
-                'Authorization': f'Bearer {self.api_key}',
-                'HTTP-Referer': 'https://github.com/anthropics/claude-code',
-                'X-Title': 'Claude Code CCM Pass1',
-                'Content-Type': 'application/json',
-            },
-            json=request
-        ) as response:
-            if response.status != 200:
-                error_text = await response.text()
-                logger.error(f"Pass 1 error {response.status}: {error_text}")
-                return prev_artefacts  # Fall back to previous artefacts
-
-            data = await response.json()
-            artefacts = data.get('choices', [{}])[0].get('message', {}).get('content', '')
-
-            # Store for next compaction
-            if artefacts:
-                self.previous_artefacts[session_id] = artefacts
-
-            logger.info(f"Pass 1 complete: {len(artefacts)} chars extracted")
-            logger.debug(f"Pass 1 artefacts:\n{artefacts[:2000]}{'...' if len(artefacts) > 2000 else ''}")
-
-            # Write artefacts to file for inspection
-            artefacts_file = CLAUDE_DIR / 'last-artefacts.txt'
-            artefacts_file.write_text(f"Session: {session_id}\nCompaction: {self.compaction_count.get(session_id, 1)}\n\n{artefacts}")
-
-            return artefacts
+        return ""
 
     async def handle_compaction(self, session_id: str, body: dict, aiohttp_session) -> tuple:
-        """Route compaction to external model via OpenRouter (two-pass).
+        """Route compaction to external model via OpenRouter (single-pass).
 
-        Pass 1: Extract/update artefacts (non-streaming)
-        Pass 2: Generate full distillation (streaming)
+        Single pass generates both artefacts and distillation together.
+        We then append the extracted artefacts at the end to guarantee preservation.
 
         Returns (async_generator, should_mark_no_thinking).
         The generator yields bytes in Claude SSE format.
@@ -728,22 +764,27 @@ class ExternalCompactionHandler:
 
         logger.info(f"External compaction {count} for session {session_id} using {model} (max_tokens={max_tokens})")
 
-        # Pass 1: Extract artefacts
-        artefacts = await self.run_pass1(body, model, session_id, aiohttp_session)
+        # Get previous artefacts for delta mode
+        prev_artefacts = self.previous_artefacts.get(session_id, 'None (first compaction)')
 
-        # Build Pass 2 prompt with artefacts
-        pass2_prompt = COMPACT_INSTRUCTIONS_PASS2.replace('{pass1_artefacts}', artefacts)
-        pass2_prompt = pass2_prompt.replace('<N tokens', f'{max_tokens} tokens')
+        # Build single-pass prompt with previous artefacts
+        system_prompt = COMPACT_INSTRUCTIONS_SINGLE_PASS.replace('{previous_artefacts}', prev_artefacts)
 
         # Transform request for OpenRouter (streaming)
         openrouter_request = self.claude_to_openai(body, model, max_tokens,
-                                                    system_prompt=pass2_prompt, stream=True)
+                                                    system_prompt=system_prompt, stream=True)
 
         logger.debug(f"OpenRouter request: {json.dumps(openrouter_request, indent=2)[:2000]}...")
 
+        # Dump full request to file for debugging
+        debug_file = CLAUDE_DIR / 'last-compaction-request.json'
+        with open(debug_file, 'w') as f:
+            json.dump(openrouter_request, f, indent=2)
+        logger.info(f"Full request dumped to {debug_file}")
+
         async def stream_response():
             total_chars = [0]  # Mutable for closure
-            collected_content = []  # Collect Pass 2 output
+            collected_content = []  # Collect output
             try:
                 async with aiohttp_session.post(
                     f'{self.api_base}/chat/completions',
@@ -797,11 +838,31 @@ class ExternalCompactionHandler:
                                 except json.JSONDecodeError:
                                     pass
 
-                    logger.info(f"Pass 2 complete: {total_chars[0]} chars output")
+                    logger.info(f"Single-pass complete: {total_chars[0]} chars output")
 
-                    # Write Pass 2 output to file for inspection
-                    pass2_file = CLAUDE_DIR / 'last-distillation.txt'
-                    pass2_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{''.join(collected_content)}")
+                    # Extract artefacts from output for storage
+                    full_output = ''.join(collected_content)
+                    extracted_artefacts = self.extract_artefacts_from_output(full_output)
+
+                    if extracted_artefacts:
+                        # Store for next compaction's delta mode
+                        self.previous_artefacts[session_id] = extracted_artefacts
+                        logger.info(f"Extracted {len(extracted_artefacts)} chars of artefacts for delta mode")
+
+                        # Write extracted artefacts to file for inspection
+                        artefacts_file = CLAUDE_DIR / 'last-artefacts.txt'
+                        artefacts_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{extracted_artefacts}")
+
+                        # Append artefacts at the end to guarantee preservation
+                        artefact_section = f"\n\n=== PRESERVED ARTEFACTS ===\n{extracted_artefacts}"
+                        total_chars[0] += len(artefact_section)
+                        collected_content.append(artefact_section)
+                        yield self._content_block_delta_event(artefact_section)
+                        logger.info(f"Appended artefacts ({len(extracted_artefacts)} chars)")
+
+                    # Write complete output to file for inspection
+                    output_file = CLAUDE_DIR / 'last-distillation.txt'
+                    output_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{''.join(collected_content)}")
 
                     yield self._content_block_stop_event()
                     yield self._message_delta_event()
