@@ -17,37 +17,202 @@ This system intercepts tool calls to manage context proactively:
 1. **Execute in hooks** - Commands run inside hooks, results cached if large
 2. **Return references** - Main agent gets pointers to cached data, not the data itself
 3. **Delegate to subagents** - Task agents access full content without polluting main context
-4. **Purge on demand** - `/purge` command truncates old outputs
+4. **External compaction** - Route summarization to cheaper external LLMs via OpenRouter
+5. **Purge on demand** - `/purge` command truncates old outputs
 
 ## Requirements
 
 - Python 3.10+
 - Claude Code CLI installed
+- `aiohttp` for the thinking proxy: `pip install aiohttp`
+- (Optional) OpenRouter API key for external compaction
+- (Optional) `tiktoken` for accurate token counting: `pip install tiktoken`
 
-## Installation
+## Quick Start
 
 ```bash
+# Clone and install
 git clone https://github.com/rpl-james-overington2/claude-context-manager.git
 cd claude-context-manager
 python3 install.py
 
-# Optional: accurate token counting (recommended)
-pip install tiktoken
-```
+# Install dependencies
+pip install aiohttp tiktoken
 
-Hooks activate on your next Claude Code session.
+# Enable the 'c' command
+source ~/.claude/setup.sh
 
-### Quick Start
-
-After installation:
-```bash
-source ~/.claude/setup.sh  # Enable 'c' alias
-c                          # Launch with --dangerously-skip-permissions
+# Start the proxy and launch Claude
+c
 ```
 
 To make permanent, add to `~/.bashrc` or `~/.zshrc`:
 ```bash
 source ~/.claude/setup.sh
+```
+
+## The `c` Command
+
+The `c` command is the recommended way to launch Claude Code with CCM:
+
+```bash
+c                           # Launch with proxy and permissions skip
+c --resume abc123           # Resume a session
+c -p "do something"         # Run with prompt
+```
+
+What `c` does:
+1. Starts the thinking proxy (if not running)
+2. Sets `ANTHROPIC_BASE_URL` to route through proxy
+3. Injects session ID headers for session tracking
+4. Runs `claude --dangerously-skip-permissions`
+
+### Configuration
+
+Set environment variables before sourcing `setup.sh`:
+
+```bash
+COMPACT_PCT=95              # Auto-compact threshold (default: 95%)
+SKIP_PERMISSIONS=true       # Skip permission prompts (default: true)
+USE_THINKING_PROXY=true     # Route through proxy (default: true)
+THINKING_PROXY_PORT=8080    # Proxy port (default: 8080)
+```
+
+## External Compaction (Optional)
+
+Route Claude's automatic compaction to external LLMs (Gemini, GPT-4, etc.) via OpenRouter. Benefits:
+
+- **Cheaper** - Use smaller, cheaper models for summarization
+- **Better summaries** - Custom distillation prompts with artefact extraction
+- **More context** - Recover the 22.5k token buffer Claude reserves
+
+### Setup
+
+1. Get an OpenRouter API key from [openrouter.ai](https://openrouter.ai)
+
+2. Create credentials file:
+```bash
+cat > ~/.claude/credentials.json << 'EOF'
+{
+  "openrouter": {
+    "api_key": "sk-or-v1-your-key-here"
+  }
+}
+EOF
+chmod 600 ~/.claude/credentials.json
+```
+
+Or set environment variable:
+```bash
+export OPENROUTER_API_KEY="sk-or-v1-your-key-here"
+```
+
+3. Enable in config (enabled by default if key is present):
+```python
+# ~/.claude/hooks/config.py
+EXTERNAL_COMPACTION_ENABLED = True
+```
+
+### How It Works
+
+When Claude triggers compaction, the proxy:
+
+1. **Detects** compaction request via system prompt pattern
+2. **Transforms** Claude messages to OpenAI format
+3. **Routes** to OpenRouter (Gemini Flash by default)
+4. **Extracts artefacts** (commands, paths, errors) for preservation
+5. **Generates distillation** with full context of artefacts
+6. **Appends artefacts** to guarantee preservation
+7. **Returns** summary in Claude SSE format
+
+### Model Selection
+
+Configure in `~/.claude/hooks/config.py`:
+
+```python
+COMPACTION_MODELS = {
+    'early': 'google/gemini-3-flash-preview',   # Compactions 1-5
+    'late': 'google/gemini-3-flash-preview',    # Compactions 6+
+}
+
+COMPACTION_MAX_TOKENS = {
+    1: 20000,
+    2: 36000,
+    3: 52000,
+    4: 64000,
+    5: 64000,
+    'default': 64000
+}
+```
+
+## Thinking Proxy
+
+The thinking proxy manages Claude's thinking blocks and routes compaction requests.
+
+### Features
+
+- **Session tracking** - Tracks sessions for thinking block management
+- **Compaction routing** - Routes `/compact` to external LLMs
+- **No-thinking mode** - Strips thinking after purge to prevent API errors
+
+### Starting the Proxy
+
+```bash
+# Linux (systemd) - auto-installed
+systemctl --user start ccm-thinking-proxy
+systemctl --user enable ccm-thinking-proxy  # Start on login
+
+# Manual (any platform)
+~/.claude/hooks/thinking-proxy.py start   # Start daemon
+~/.claude/hooks/thinking-proxy.py status  # Check status
+~/.claude/hooks/thinking-proxy.py stop    # Stop daemon
+~/.claude/hooks/thinking-proxy.py restart # Restart daemon
+```
+
+### Debugging
+
+Enable debug logging:
+```python
+# ~/.claude/hooks/config.py
+THINKING_PROXY_DEBUG_LOG = True
+```
+
+Check logs:
+```bash
+tail -f ~/.claude/proxy.log
+```
+
+Compaction debug files:
+- `~/.claude/last-compaction-request.json` - Full request to OpenRouter
+- `~/.claude/last-artefacts.txt` - Extracted artefacts
+- `~/.claude/last-distillation.txt` - Final distillation output
+
+## Installation Details
+
+### What Gets Installed
+
+```
+~/.claude/
+├── hooks/
+│   ├── intercept-bash.py      # Bash command interception
+│   ├── intercept-glob.py      # File glob interception
+│   ├── intercept-grep.py      # Grep/ripgrep interception
+│   ├── intercept-read.py      # Large file read interception
+│   ├── context-monitor.py     # Context usage warnings
+│   ├── learn-large-commands.py # Pattern learning
+│   ├── pre-compact.py         # Custom compaction instructions
+│   ├── thinking-proxy.py      # Thinking block proxy
+│   ├── claude-session-purge.py # Session purge tool
+│   ├── config.py              # Configuration
+│   └── lib/                   # Shared libraries
+├── commands/
+│   ├── purge.md               # /purge slash command
+│   └── ccm.md                 # /ccm slash command
+├── setup.sh                   # Shell function setup
+├── compact-instructions.txt   # Compaction instructions (customizable)
+├── credentials.json           # API keys (you create this)
+├── proxy-state/               # Proxy session state
+└── settings.json              # Hook registration (merged)
 ```
 
 ## Uninstallation
@@ -68,34 +233,6 @@ python3 enable.py    # Re-enable hooks
 Or use environment variable for a single session:
 ```bash
 CLAUDE_HOOKS_PASSTHROUGH=1 claude
-```
-
-## Surviving Claude Code Updates
-
-**Your hooks will survive Claude Code updates.** The `~/.claude/` directory is user configuration space - Claude Code updates only touch the application in `~/.local/share/claude/` (native) or `node_modules/` (npm).
-
-However, if Claude Code changes its hook API in a breaking way, hooks may need updating. Check the repository for compatibility updates after major Claude Code releases.
-
-## What Gets Installed
-
-```
-~/.claude/
-├── hooks/
-│   ├── intercept-bash.py      # Bash command interception
-│   ├── intercept-glob.py      # File glob interception
-│   ├── intercept-grep.py      # Grep/ripgrep interception
-│   ├── intercept-read.py      # Large file read interception
-│   ├── context-monitor.py     # Context usage warnings
-│   ├── learn-large-commands.py # Pattern learning
-│   ├── pre-compact.py         # Custom compaction instructions
-│   ├── claude-session-purge.py # Session purge tool
-│   ├── config.py              # Configuration
-│   └── lib/common.py          # Shared library
-├── commands/
-│   └── purge.md               # /purge slash command
-├── setup.sh                   # Shell alias setup
-├── compact-instructions.txt   # Compaction instructions (customizable)
-└── settings.json              # Hook registration (merged)
 ```
 
 ## Usage
@@ -133,21 +270,19 @@ Options:
 
 At 70%, 80%, 90% context usage (configurable), you'll see warnings:
 ```
-⚠️ WARNING: Context at 72% (~144,000 tokens, tiktoken). Consider running /purge soon.
+WARNING: Context at 72% (~144,000 tokens, tiktoken). Consider running /purge soon.
 ```
-
-For accurate token counting, install tiktoken: `pip install tiktoken`
 
 ### The `/purge` Command
 
 When context is critical, run `/purge` to:
-- Preserve thinking blocks (for future development)
-- Truncate large tool outputs
-- Repair any structural issues
+- Truncate large tool outputs to CCM stubs
+- Preserve recent context
+- Restart session with preserved state
 
 ### Auto-Compaction Control
 
-Compaction triggers at 80% context by default (configurable). This is set via `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` in settings.json.
+Compaction triggers at 95% context by default (configurable via `COMPACT_PCT` or `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`).
 
 ### Custom Compaction Instructions
 
@@ -182,8 +317,13 @@ PRE_COMPACT_ENABLED = True
 CONTEXT_MONITOR_ENABLED = True
 CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 
-PATTERNS_EXPIRY_DAYS = 30
-METRICS_ENABLED = False
+# External compaction
+EXTERNAL_COMPACTION_ENABLED = True
+# API key loaded from ~/.claude/credentials.json or OPENROUTER_API_KEY env var
+
+# Thinking proxy
+THINKING_PROXY_ENABLED = True
+THINKING_PROXY_PORT = 8080
 ```
 
 ## Files That Bypass Interception
@@ -193,51 +333,17 @@ These always pass through unmodified:
 - `*.json`, `*.yaml`, `*.yml`, `*.toml` - Configuration
 - `*.lock`, `*.env*` - Lock and environment files
 
-## Thinking Proxy
-
-The thinking proxy is an optional component that manages Claude's thinking blocks on a per-session basis. It allows sessions to benefit from extended thinking until purge, then automatically disables thinking to prevent API consistency errors.
-
-### How It Works
-
-1. **Before purge**: Sessions operate normally with full thinking enabled
-2. **After `/purge`**: The session is flagged for no-thinking mode
-3. **On resume**: The proxy strips thinking from requests/responses for that session
-
-### Starting the Proxy
-
-```bash
-# Linux (systemd)
-systemctl --user start ccm-thinking-proxy
-systemctl --user enable ccm-thinking-proxy  # Start on login
-
-# Manual (any platform)
-~/.claude/hooks/thinking-proxy.py start   # Start daemon
-~/.claude/hooks/thinking-proxy.py status  # Check status
-~/.claude/hooks/thinking-proxy.py stop    # Stop daemon
-```
-
-### Requirements
-
-The proxy requires aiohttp:
-```bash
-pip install aiohttp
-```
-
-### Disabling the Proxy
-
-To bypass the proxy temporarily:
-```bash
-unset ANTHROPIC_BASE_URL
-claude
-```
-
-Or set `USE_THINKING_PROXY=false` before sourcing setup.sh.
-
 ## Troubleshooting
 
 ### Bypass hooks temporarily
 ```bash
 CLAUDE_HOOKS_PASSTHROUGH=1 claude
+```
+
+### Bypass proxy temporarily
+```bash
+unset ANTHROPIC_BASE_URL
+claude
 ```
 
 ### Analyze session without changes
@@ -250,9 +356,20 @@ CLAUDE_HOOKS_PASSTHROUGH=1 claude
 rm -rf ~/.claude/cache/*
 ```
 
+### Check proxy status
+```bash
+~/.claude/hooks/thinking-proxy.py status
+```
+
+### View proxy logs
+```bash
+tail -f ~/.claude/proxy.log
+```
+
 ## Documentation
 
-Full documentation: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+- Full documentation: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+- External compaction: `docs/EXTERNAL_COMPACTION.md`
 
 ## License
 

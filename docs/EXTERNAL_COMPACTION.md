@@ -2,7 +2,7 @@
 
 ## Overview
 
-Route Claude Code's automatic compaction requests to an external LLM (GPT-5 Nano) instead of using Claude for self-summarization. This recovers the 22.5k token buffer Claude reserves for compaction and enables smarter, cheaper summarization.
+Route Claude Code's automatic compaction requests to an external LLM (Gemini Flash) instead of using Claude for self-summarization. This recovers the 22.5k token buffer Claude reserves for compaction and enables smarter, cheaper summarization with artefact extraction.
 
 ## Why External Compaction
 
@@ -15,8 +15,9 @@ Route Claude Code's automatic compaction requests to an external LLM (GPT-5 Nano
 ### External Compaction Benefits
 - Recovers 22.5k buffer (12.6% more usable context)
 - Cheaper model for summarization task
-- Variable output size (up to 128k with GPT-5 Nano)
-- Density-aware compression strategy
+- Variable output size (up to 64k with Gemini Flash)
+- Single-pass artefact extraction + distillation
+- Guaranteed artefact preservation via programmatic append
 
 ## Target Models
 
@@ -28,34 +29,50 @@ Use OpenRouter for flexibility - single API, access to all providers:
 - Fallback options if provider is down
 - Single API key management
 
-### Two-Tier Strategy
+### Model Strategy
 
-| Model | Context | Use Case | OpenRouter ID |
-|-------|---------|----------|---------------|
-| Gemini 2.0 Flash Lite | 1M+ | Early compactions (1-5) | `google/gemini-2.0-flash-lite-001` |
-| Gemini 2.0 Flash | 1M+ | Later compactions (6+) | `google/gemini-2.0-flash-001` |
+| Model | Context | Output Limit | Use Case | OpenRouter ID |
+|-------|---------|--------------|----------|---------------|
+| Gemini 3 Flash Preview | 1M+ | 64k | All compactions | `google/gemini-3-flash-preview` |
 
-### Tier Selection Rationale
+### Why Gemini 3 Flash
 
-**Gemini 2.0 Flash Lite (Early)**
-- Sufficient for low-density content
-- Generous output budget compensates for smaller model
-- Handles verbose tool outputs, boilerplate easily
-- Cost-effective for frequent early compactions
-
-**Gemini 2.0 Flash (Later)**
-- Higher capability for dense, distilled content
-- Better at preserving nuanced technical context
-- Worth the cost when compounding quality matters
-- Used when compression becomes harder
+- **64k output limit** - Sufficient for comprehensive distillations
+- **Cost-effective** - Cheaper than Pro variants
+- **Fast** - Low latency for streaming responses
+- **High quality** - Follows structured prompts well
 
 ### Flexibility via OpenRouter
 
 Can easily swap models based on experimentation:
-- `mistralai/mistral-large` - Alternative high-capability option
+- `google/gemini-3-pro-preview` - Higher capability, more expensive
 - `anthropic/claude-3-haiku` - If staying in Anthropic ecosystem preferred
-- `meta-llama/llama-3-70b` - Open-source option
-- Any model with sufficient context window
+- Any model with sufficient context window and output limit
+
+## Single-Pass Distillation
+
+The system uses a single-pass approach that combines artefact extraction and distillation:
+
+### How It Works
+
+1. **Single prompt** instructs the LLM to:
+   - First extract all execution-critical artefacts (commands, paths, errors, code)
+   - Then write a comprehensive distillation using those artefacts
+
+2. **Artefact extraction** from output:
+   - Proxy parses the LLM's output to find the ARTEFACTS section
+   - Stores artefacts for next compaction's delta mode
+
+3. **Programmatic append**:
+   - After LLM response, proxy appends the extracted artefacts
+   - Guarantees artefact preservation regardless of LLM verbosity
+
+### Benefits
+
+- **One API call** instead of two (faster, cheaper)
+- **Artefacts in context** when LLM writes distillation
+- **Guaranteed preservation** via append (never lost)
+- **Delta mode** for subsequent compactions (only output changes)
 
 ## Compaction Detection
 
@@ -440,23 +457,29 @@ If the CLI updates, the script re-detects and re-patches.
 
 # External compaction settings
 EXTERNAL_COMPACTION_ENABLED = True
-OPENROUTER_API_KEY = os.environ.get('OPENROUTER_API_KEY')
+
+# API key loaded from ~/.claude/credentials.json or OPENROUTER_API_KEY env var
+# credentials.json format:
+# {
+#   "openrouter": {
+#     "api_key": "sk-or-v1-your-key-here"
+#   }
+# }
 
 # Model selection by compaction number (OpenRouter model IDs)
 COMPACTION_MODELS = {
-    'early': 'google/gemini-2.0-flash-lite-001',   # Compactions 1-5
-    'late': 'google/gemini-2.0-flash-001',         # Compactions 6+
+    'early': 'google/gemini-3-flash-preview',   # Compactions 1-5
+    'late': 'google/gemini-3-flash-preview',    # Compactions 6+
 }
 
-# Output token limits (generous early, tighter late)
+# Output token limits (scale up with compaction number)
 COMPACTION_MAX_TOKENS = {
-    1: 80000,
-    2: 75000,
-    3: 70000,
-    4: 65000,
-    5: 60000,
-    # Later compactions use default
-    'default': 50000
+    1: 20000,
+    2: 36000,
+    3: 52000,
+    4: 64000,
+    5: 64000,
+    'default': 64000  # Gemini 3 Flash caps at 64k
 }
 ```
 

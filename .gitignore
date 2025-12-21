@@ -21,3 +21,6 @@ Thumbs.db
 
 # Project specific
 *.backup.*
+credentials.json
+*.credentials*
+*.secret*
