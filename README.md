@@ -39,21 +39,18 @@ python3 install.py
 # Install dependencies
 pip install aiohttp tiktoken
 
-# Enable the 'c' command
-source ~/.claude/setup.sh
-
-# Start the proxy and launch Claude
+# Launch Claude with CCM
 c
 ```
 
-To make permanent, add to `~/.bashrc` or `~/.zshrc`:
+The installer creates a symlink at `~/.local/bin/c`. If not in PATH, add to `~/.bashrc` or `~/.zshrc`:
 ```bash
-source ~/.claude/setup.sh
+export PATH="$HOME/.local/bin:$PATH"
 ```
 
 ## The `c` Command
 
-The `c` command is the recommended way to launch Claude Code with CCM:
+The `c` command launches Claude Code with CCM integration:
 
 ```bash
 c                           # Launch with proxy and permissions skip
@@ -63,19 +60,22 @@ c -p "do something"         # Run with prompt
 
 What `c` does:
 1. Starts the thinking proxy (if not running)
-2. Sets `ANTHROPIC_BASE_URL` to route through proxy
-3. Injects session ID headers for session tracking
-4. Runs `claude --dangerously-skip-permissions`
+2. Runs `claude` with env vars scoped to that process only:
+   - `ANTHROPIC_BASE_URL` - Routes through proxy
+   - `ANTHROPIC_CUSTOM_HEADERS` - Session ID for tracking
+   - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` - Compaction threshold
+3. Adds `--dangerously-skip-permissions`
+
+No terminal pollution - env vars are only set for the claude process.
 
 ### Configuration
 
-Set environment variables before sourcing `setup.sh`:
+Override defaults with env vars:
 
 ```bash
-COMPACT_PCT=95              # Auto-compact threshold (default: 95%)
-SKIP_PERMISSIONS=true       # Skip permission prompts (default: true)
-USE_THINKING_PROXY=true     # Route through proxy (default: true)
-THINKING_PROXY_PORT=8080    # Proxy port (default: 8080)
+COMPACT_PCT=90 c                    # Different threshold
+SKIP_PERMISSIONS=false c            # Prompt for permissions
+THINKING_PROXY_PORT=9000 c          # Different port
 ```
 
 ## External Compaction (Optional)

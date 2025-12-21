@@ -1,0 +1,113 @@
+#!/bin/bash
+# Claude Code launcher with CCM integration
+#
+# Usage:
+#   c                    # Launch claude with proxy
+#   c --resume abc123    # Resume a session
+#   c -p "do something"  # Run with prompt
+#
+# Install:
+#   ln -sf ~/.claude/hooks/c ~/.local/bin/c
+#   # or add ~/.claude/hooks to PATH
+
+set -e
+
+# Configuration (override with env vars if needed)
+COMPACT_PCT="${COMPACT_PCT:-95}"
+THINKING_PROXY_PORT="${THINKING_PROXY_PORT:-8080}"
+SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-true}"
+
+CLAUDE_DIR="$HOME/.claude"
+PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
+PROXY_PID_FILE="$CLAUDE_DIR/proxy.pid"
+
+# Find session ID from args or most recent session
+find_session_id() {
+    local session_id=""
+    local args=("$@")
+    local i=0
+
+    while [[ $i -lt ${#args[@]} ]]; do
+        case "${args[i]}" in
+            --resume=*)
+                session_id="${args[i]#--resume=}"
+                break
+                ;;
+            -r=*)
+                session_id="${args[i]#-r=}"
+                break
+                ;;
+            --resume|-r)
+                if [[ $((i+1)) -lt ${#args[@]} ]]; then
+                    session_id="${args[$((i+1))]}"
+                    break
+                fi
+                ;;
+        esac
+        ((i++))
+    done
+
+    # If no explicit session, find most recent for current directory
+    if [[ -z "$session_id" ]]; then
+        local project_path
+        project_path=$(pwd | sed 's|/|-|g')
+        [[ "$project_path" != -* ]] && project_path="-$project_path"
+        local sessions_dir="$CLAUDE_DIR/projects$project_path"
+
+        if [[ -d "$sessions_dir" ]]; then
+            session_id=$(find "$sessions_dir" -maxdepth 1 -name '*.jsonl' \
+                -not -name '*backup*' -not -name 'agent-*' \
+                -printf '%T@ %f\n' 2>/dev/null | sort -rn | head -1 | awk '{print $2}' | sed 's/\.jsonl$//')
+        fi
+    fi
+
+    echo "$session_id"
+}
+
+# Ensure proxy is running
+ensure_proxy() {
+    if [[ -f "$PROXY_SCRIPT" ]]; then
+        # Check if proxy is responding
+        if ! curl -s --connect-timeout 1 "http://127.0.0.1:$THINKING_PROXY_PORT/health" >/dev/null 2>&1; then
+            # Start proxy
+            "$PROXY_SCRIPT" start >/dev/null 2>&1 || true
+            # Wait briefly for startup
+            sleep 0.5
+        fi
+    fi
+}
+
+# Main
+main() {
+    local session_id
+    session_id=$(find_session_id "$@")
+
+    # Start proxy if available
+    ensure_proxy
+
+    # Build environment for claude (scoped to this process only)
+    local env_vars=(
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
+        "ANTHROPIC_BASE_URL=http://127.0.0.1:$THINKING_PROXY_PORT"
+    )
+
+    # Add session header if we have a session ID
+    if [[ -n "$session_id" ]]; then
+        env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
+    fi
+
+    # Build command
+    local cmd=(env "${env_vars[@]}" claude)
+
+    if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
+        cmd+=(--dangerously-skip-permissions)
+    fi
+
+    # Add user args
+    cmd+=("$@")
+
+    # Execute
+    exec "${cmd[@]}"
+}
+
+main "$@"

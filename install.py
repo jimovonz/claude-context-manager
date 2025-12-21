@@ -297,15 +297,37 @@ def install():
         setup_systemd_service()
         print()
 
+    # Create symlink for 'c' command
+    print("Setting up 'c' command...")
+    local_bin = Path.home() / '.local' / 'bin'
+    c_script = HOOKS_DIR / 'c'
+    c_link = local_bin / 'c'
+
+    if c_script.exists():
+        local_bin.mkdir(parents=True, exist_ok=True)
+        # Remove existing symlink/file if present
+        if c_link.exists() or c_link.is_symlink():
+            c_link.unlink()
+        c_link.symlink_to(c_script)
+        print(f"  Created symlink: {c_link} -> {c_script}")
+
+        # Check if ~/.local/bin is in PATH
+        path_dirs = os.environ.get('PATH', '').split(':')
+        if str(local_bin) not in path_dirs:
+            print(f"  Note: Add ~/.local/bin to PATH if not already present")
+    print()
+
     print("=" * 50)
     print("Installation complete!")
     print()
-    print("Hooks will activate on next Claude Code session.")
-    print()
     print("Quick start:")
-    print("  source ~/.claude/setup.sh  # Enable 'c' function")
-    print("  c                          # Launch with --dangerously-skip-permissions")
+    print("  c                          # Launch claude with proxy")
+    print("  c --resume <session>       # Resume a session")
     print()
+    if str(local_bin) not in os.environ.get('PATH', '').split(':'):
+        print("Add to ~/.bashrc or ~/.zshrc:")
+        print('  export PATH="$HOME/.local/bin:$PATH"')
+        print()
     print("Thinking Proxy:")
     if has_aiohttp:
         if sys.platform.startswith('linux'):
@@ -318,10 +340,13 @@ def install():
         print("  Install aiohttp first: pip install aiohttp")
         print("  Then start: ~/.claude/hooks/thinking-proxy.py start")
     print()
+    print("External Compaction (optional):")
+    print("  Create ~/.claude/credentials.json with OpenRouter API key")
+    print("  See README.md for details")
+    print()
     print("Configuration:")
     print("  ~/.claude/hooks/config.py            # All settings")
     print("  ~/.claude/compact-instructions.txt   # Compaction instructions")
-    print("  ~/.claude/setup.sh                   # Shell function setup")
     print()
     print("Documentation: ~/.claude/hooks/CONTEXT_MANAGEMENT.md")
     print()
