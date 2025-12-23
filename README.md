@@ -12,6 +12,8 @@ Hooks and tools for managing Claude Code's context window to prevent premature c
 
 ![Claude Code with CCM: 5% autocompact buffer and reduced system prompt (2.9k tokens)](claud_context.png)
 
+*Custom system prompts are possible via the thinking proxy. This screenshot shows a fully functional session with a minimal system prompt (2.9k tokens vs default ~19.5k) - demonstrating that Claude Code remains completely workable with minimal compromises while maximizing available context.*
+
 ## The Problem
 
 Claude Code's context window is finite. When filled, automatic compaction discards content - often removing critical reasoning chains and decisions mid-task. Large tool outputs (grep results, build logs, file listings) are the primary cause.
