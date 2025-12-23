@@ -10,7 +10,7 @@ Hooks and tools for managing Claude Code's context window to prevent premature c
 
 **Platform Support:** Linux only. No Windows testing has been done.
 
-![Claude Code with CCM showing 5% autocompact buffer](claud_context.png)
+![Claude Code with CCM: 5% autocompact buffer and reduced system prompt (2.9k tokens)](claud_context.png)
 
 ## The Problem
 
