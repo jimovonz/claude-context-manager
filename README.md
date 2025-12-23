@@ -1,10 +1,14 @@
 # Claude Context Manager
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/rpl-james-overington2/claude-context-manager)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
+[![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
+[![Claude Code](https://img.shields.io/badge/claude--code-2.0.75-purple.svg)](https://claude.ai/claude-code)
 
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
+
+**Platform Support:** Linux only. No Windows testing has been done.
 
 ## The Problem
 
@@ -22,8 +26,9 @@ This system intercepts tool calls to manage context proactively:
 
 ## Requirements
 
+- **Linux** (no Windows support)
 - Python 3.10+
-- Claude Code CLI installed
+- Claude Code CLI v2.0.75+ installed
 - `aiohttp` for the thinking proxy: `pip install aiohttp`
 - (Optional) OpenRouter API key for external compaction
 - (Optional) `tiktoken` for accurate token counting: `pip install tiktoken`
@@ -32,7 +37,7 @@ This system intercepts tool calls to manage context proactively:
 
 ```bash
 # Clone and install
-git clone https://github.com/rpl-james-overington2/claude-context-manager.git
+git clone https://github.com/jimovonz/claude-context-manager.git
 cd claude-context-manager
 python3 install.py
 

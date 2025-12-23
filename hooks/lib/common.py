@@ -176,7 +176,9 @@ def build_ccm_cache_response(
             return f"""{stub}
 Original: {original}
 
-Options: Task agent (summarize or full content), or paginate with offset/limit."""
+Options: Task agent (summarize or full content), or paginate with offset/limit.
+
+YOU MUST SPAWN A SUBAGENT TO RETRIEVE THIS CONTENT USING: ~/.claude/hooks/ccm-get.py {key}"""
         except ImportError:
             pass
 
@@ -200,7 +202,9 @@ def build_cache_response(file_uuid: str, lines: int, size: int, exit_code: int, 
 File: ~/.claude/cache/{file_uuid}
 Original: {original}
 
-Options: Task agent (summarize or full content), or paginate with offset/limit."""
+Options: Task agent (summarize or full content), or paginate with offset/limit.
+
+YOU MUST SPAWN A SUBAGENT TO RETRIEVE THIS CONTENT USING: ~/.claude/hooks/ccm-get.py ~/.claude/cache/{file_uuid}"""
 
 
 def log_metric(tool: str, action: str, size: int = 0) -> None:

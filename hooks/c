@@ -20,6 +20,7 @@ SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-true}"
 CLAUDE_DIR="$HOME/.claude"
 PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
 PROXY_PID_FILE="$CLAUDE_DIR/proxy.pid"
+PATCHER_SCRIPT="$CLAUDE_DIR/hooks/patch-autocompact.py"
 
 # Find session ID from args or most recent session
 find_session_id() {
@@ -77,6 +78,13 @@ ensure_proxy() {
     fi
 }
 
+# Get patched CLI path
+get_patched_cli() {
+    if [[ -f "$PATCHER_SCRIPT" ]]; then
+        "$PATCHER_SCRIPT" --get-patched 2>/dev/null
+    fi
+}
+
 # Main
 main() {
     local session_id
@@ -84,6 +92,10 @@ main() {
 
     # Start proxy if available
     ensure_proxy
+
+    # Get patched CLI (creates if needed)
+    local patched_cli
+    patched_cli=$(get_patched_cli)
 
     # Build environment for claude (scoped to this process only)
     local env_vars=(
@@ -96,8 +108,13 @@ main() {
         env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
     fi
 
-    # Build command
-    local cmd=(env "${env_vars[@]}" claude)
+    # Build command - use patched CLI if available, otherwise fall back to claude
+    local cmd
+    if [[ -n "$patched_cli" && -f "$patched_cli" ]]; then
+        cmd=(env "${env_vars[@]}" node "$patched_cli")
+    else
+        cmd=(env "${env_vars[@]}" claude)
+    fi
 
     if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
         cmd+=(--dangerously-skip-permissions)
