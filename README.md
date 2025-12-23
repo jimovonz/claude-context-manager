@@ -289,6 +289,8 @@ When context is critical, run `/purge` to:
 - Preserve recent context
 - Restart session with preserved state
 
+**Note:** `/purge` is less necessary when using external compaction via OpenRouter, as the custom compaction already performs intelligent summarization with artefact extraction.
+
 ### Auto-Compaction Control
 
 Compaction triggers at 95% context by default (configurable via `COMPACT_PCT` or `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`).
