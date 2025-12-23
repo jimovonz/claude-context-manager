@@ -10,6 +10,8 @@ Hooks and tools for managing Claude Code's context window to prevent premature c
 
 **Platform Support:** Linux only. No Windows testing has been done.
 
+![Claude Code with CCM showing 5% autocompact buffer](claud_context.png)
+
 ## The Problem
 
 Claude Code's context window is finite. When filled, automatic compaction discards content - often removing critical reasoning chains and decisions mid-task. Large tool outputs (grep results, build logs, file listings) are the primary cause.
