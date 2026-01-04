@@ -55,10 +55,22 @@ def main():
     # Block main agent from reading cache files
     file_path_str = str(file_path)
     if '/tmp/claude-tool-cache/' in file_path_str:
-        json_block("Cache file - use Task agent to read.")
+        json_block("Cache file - use Task agent or ccm-get.py to retrieve.")
         return
     if '/.claude/cache/' in file_path_str:
-        json_block("Cache file - use Task agent to read.")
+        # Check if this is a CCM blob path (contains sha256 hash)
+        ccm_match = re.search(r'ccm/blobs/([a-f0-9]{2})/([a-f0-9]{62})', file_path_str)
+        if ccm_match:
+            key = f"sha256:{ccm_match.group(1)}{ccm_match.group(2)}"
+            json_block(f"CCM cached content. Retrieve with: ~/.claude/hooks/ccm-get.py {key}")
+            return
+        # Legacy cache file (8-char hex)
+        legacy_match = re.search(r'/cache/([a-f0-9]{8})$', file_path_str)
+        if legacy_match:
+            json_block(f"Cached content. Retrieve with: ~/.claude/hooks/ccm-get.py ~/.claude/cache/{legacy_match.group(1)}")
+            return
+        # Generic cache path
+        json_block("Cache file - use Task agent or ~/.claude/hooks/ccm-get.py to retrieve.")
         return
 
     # Extract remaining Read parameters

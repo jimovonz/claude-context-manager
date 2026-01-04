@@ -45,7 +45,7 @@ find_session_id() {
                 fi
                 ;;
         esac
-        ((i++))
+        ((++i))
     done
 
     # If no explicit session, find most recent for current directory
@@ -68,11 +68,13 @@ find_session_id() {
 # Ensure proxy is running
 ensure_proxy() {
     if [[ -f "$PROXY_SCRIPT" ]]; then
-        # Check if proxy is responding
-        if ! curl -s --connect-timeout 1 "http://127.0.0.1:$THINKING_PROXY_PORT/health" >/dev/null 2>&1; then
-            # Start proxy
+        if command -v curl >/dev/null 2>&1; then
+            if ! curl -s --connect-timeout 1 "http://127.0.0.1:$THINKING_PROXY_PORT/health" >/dev/null 2>&1; then
+                "$PROXY_SCRIPT" start >/dev/null 2>&1 || true
+                sleep 0.5
+            fi
+        else
             "$PROXY_SCRIPT" start >/dev/null 2>&1 || true
-            # Wait briefly for startup
             sleep 0.5
         fi
     fi
@@ -90,25 +92,20 @@ main() {
     local session_id
     session_id=$(find_session_id "$@")
 
-    # Start proxy if available
     ensure_proxy
 
-    # Get patched CLI (creates if needed)
     local patched_cli
-    patched_cli=$(get_patched_cli)
+    patched_cli=$(get_patched_cli || true)
 
-    # Build environment for claude (scoped to this process only)
     local env_vars=(
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
         "ANTHROPIC_BASE_URL=http://127.0.0.1:$THINKING_PROXY_PORT"
     )
 
-    # Add session header if we have a session ID
     if [[ -n "$session_id" ]]; then
         env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
     fi
 
-    # Build command - use patched CLI if available, otherwise fall back to claude
     local cmd
     if [[ -n "$patched_cli" && -f "$patched_cli" ]]; then
         cmd=(env "${env_vars[@]}" node "$patched_cli")
@@ -120,10 +117,8 @@ main() {
         cmd+=(--dangerously-skip-permissions)
     fi
 
-    # Add user args
     cmd+=("$@")
 
-    # Execute
     exec "${cmd[@]}"
 }
 

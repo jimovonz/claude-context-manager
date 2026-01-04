@@ -50,11 +50,20 @@ CACHE_DIR = Path.home() / ".claude" / "patch-cache"
 CACHE_FILE = CACHE_DIR / "autocompact-patch.json"
 PATCHED_DIR = Path.home() / ".claude" / "patched"
 
-# Hook reply patch patterns
-HOOK_ERROR_OPEN = '"<e>":"<error>"'
-HOOK_ERROR_CLOSE = '"</e>":"</error>"'
-HOOK_REPLY_OPEN = '"<e>":"<reply>"'
-HOOK_REPLY_CLOSE = '"</e>":"</reply>"'
+# Hook reply patch patterns - replace "error" with "reply" in hook blocking messages
+# These are same-length replacements for safe sed-style patching
+HOOK_PATTERNS = [
+    # Message type (6 occurrences)
+    ('"hook_blocking_error"', '"hook_blocking_reply"'),
+    # Display text (2 occurrences)
+    ('hook returned blocking error', 'hook returned blocking reply'),
+    # System message (1 occurrence)
+    ('hook blocking error from command', 'hook blocking reply from command'),
+]
+
+# Hook is_error patch - DISABLED for v2.0.76+ (patterns changed)
+# The minified code structure changed; these patterns no longer exist
+HOOK_IS_ERROR_PATTERNS = []
 
 
 def find_cli_path() -> Path | None:
@@ -187,15 +196,16 @@ def find_autocompact_mathmin(content: str) -> tuple[int, int, str] | None:
     return None
 
 
-def check_already_patched(content: str) -> tuple[bool, bool, bool, bool]:
+def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool]:
     """Check if the file is already patched.
 
-    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched)
+    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched)
     """
     trigger_patched = False
     display_patched = False
     pct_base_patched = False
     hook_reply_patched = False
+    hook_is_error_patched = False
 
     # Check trigger patch: Math.max in autocompact function
     env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
@@ -235,15 +245,25 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool]:
             pct_base_patched = True
             break
 
-    # Check hook reply patch: <error> → <reply> in tag mapping
-    # Patched if we find <reply> instead of <error>
-    if HOOK_REPLY_OPEN in content and HOOK_REPLY_CLOSE in content:
-        hook_reply_patched = True
-    elif HOOK_ERROR_OPEN not in content:
-        # Neither found - different CLI version, consider it patched
-        hook_reply_patched = True
+    # Check hook reply patch: "error" → "reply" in hook blocking messages
+    # Patched if all error patterns are replaced with reply patterns
+    hook_reply_patched = True
+    for error_pat, reply_pat in HOOK_PATTERNS:
+        if error_pat in content:
+            hook_reply_patched = False
+            break
+        # Verify the replacement exists (unless it's a version without this pattern)
+        # We only require the first pattern (message type) to exist
 
-    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched)
+    # Check hook is_error patch: is_error:!0 → is_error:!1 for hook blocks
+    # Patched if original pattern is gone and replacement exists
+    hook_is_error_patched = True
+    for error_pat, reply_pat in HOOK_IS_ERROR_PATTERNS:
+        if error_pat in content:
+            hook_is_error_patched = False
+            break
+
+    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched)
 
 
 def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
@@ -352,6 +372,7 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     2. Display calculation (EHA()-bH0 → ET2())
     3. Percentage base (A*(G/100) → NO(p3())*(G/100))
     4. Hook reply (<error> → <reply>)
+    5. Hook is_error (is_error:!0 → is_error:!1)
 
     Returns: (success, message)
     """
@@ -359,9 +380,9 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     messages = []
 
     # Check current patch status
-    trigger_patched, display_patched, pct_base_patched, hook_reply_patched = check_already_patched(content)
+    trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
 
-    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched:
+    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched:
         return (True, "Already fully patched")
 
     # Create backup if it doesn't exist (only for in-place patching)
@@ -422,19 +443,39 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     else:
         messages.append("Pct base already patched")
 
-    # Patch 4: Hook reply (<error> → <reply>)
+    # Patch 4: Hook reply (error → reply in hook blocking messages)
     if not hook_reply_patched:
-        if HOOK_ERROR_OPEN in content:
-            if dry_run:
-                messages.append(f"Would patch hook reply: <error>→<reply>")
-            else:
-                content = content.replace(HOOK_ERROR_OPEN, HOOK_REPLY_OPEN)
-                content = content.replace(HOOK_ERROR_CLOSE, HOOK_REPLY_CLOSE)
-                messages.append("Patched hook reply: <error>→<reply>")
-        else:
-            messages.append("Hook reply pattern not found (may be different CLI version)")
+        patched_any = False
+        for error_pat, reply_pat in HOOK_PATTERNS:
+            if error_pat in content:
+                if dry_run:
+                    messages.append(f"Would patch: {error_pat[:30]}...→{reply_pat[:30]}...")
+                else:
+                    content = content.replace(error_pat, reply_pat)
+                    patched_any = True
+        if patched_any:
+            messages.append("Patched hook reply: error→reply")
+        elif not dry_run:
+            messages.append("Hook reply patterns not found (may be different CLI version)")
     else:
         messages.append("Hook reply already patched")
+
+    # Patch 5: Hook is_error (is_error:!0 → is_error:!1 for hook blocks)
+    if not hook_is_error_patched:
+        patched_any = False
+        for error_pat, reply_pat in HOOK_IS_ERROR_PATTERNS:
+            if error_pat in content:
+                if dry_run:
+                    messages.append(f"Would patch is_error: {error_pat[:40]}...→{reply_pat[:40]}...")
+                else:
+                    content = content.replace(error_pat, reply_pat)
+                    patched_any = True
+        if patched_any:
+            messages.append("Patched hook is_error: !0→!1")
+        elif not dry_run:
+            messages.append("Hook is_error patterns not found (may be different CLI version)")
+    else:
+        messages.append("Hook is_error already patched")
 
     if dry_run:
         return (True, "; ".join(messages))
@@ -444,11 +485,11 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
 
     # Verify
     verify_content = cli_path.read_text()
-    trigger_ok, display_ok, pct_ok, hook_ok = check_already_patched(verify_content)
+    trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok = check_already_patched(verify_content)
 
-    # Core patches: trigger and hook_reply are essential
+    # Core patches: trigger, hook_reply, hook_is_error are essential
     # Display and pct_base are optional (may not match on all versions)
-    if trigger_ok and hook_ok:
+    if trigger_ok and hook_ok and hook_is_error_ok:
         return (True, "; ".join(messages))
     else:
         # Restore backup if we created one
@@ -463,8 +504,9 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     """
     Get path to a patched CLI copy.
 
-    Creates a patched copy if needed, using hash-based naming for cache invalidation.
-    The patched copy is stored in ~/.claude/patched/cli-{hash}.js
+    Creates a patched copy alongside the original CLI (same directory) so that
+    __dirname-based path resolution works correctly for command discovery.
+    The patched copy is named cli-ccm.js in the same directory as cli.js.
 
     Returns: (patched_path, message) or (None, error_message)
     """
@@ -477,32 +519,32 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     if not cli_path.exists():
         return (None, f"CLI not found at {cli_path}")
 
-    # Compute source hash
-    source_hash = get_file_hash(cli_path)
+    # Patched copy lives alongside original for correct path resolution
+    patched_path = cli_path.parent / "cli-ccm.js"
 
-    # Check for existing patched copy
-    PATCHED_DIR.mkdir(parents=True, exist_ok=True)
-    patched_path = PATCHED_DIR / f"cli-{source_hash}.js"
+    # Compute source hash to detect CLI updates
+    source_hash = get_file_hash(cli_path)
+    hash_marker = f"// CCM-PATCHED: {source_hash}"
 
     if patched_path.exists():
-        # Verify it's still valid
         content = patched_path.read_text()
-        trigger_ok, display_ok, pct_ok, hook_ok = check_already_patched(content)
-        if trigger_ok and hook_ok:  # display and pct are optional
-            return (patched_path, "Using cached patched CLI")
-        # Invalid cache, remove it
+        # Check if it's our patched version and matches current source
+        if hash_marker in content[:500]:  # Check near start of file
+            trigger_ok, display_ok, pct_ok, hook_ok = check_already_patched(content)
+            if trigger_ok and hook_ok:  # display and pct are optional
+                return (patched_path, "Using cached patched CLI")
+        # Stale or invalid, remove it
         patched_path.unlink()
 
-    # Clean up old patched versions (keep only current)
-    for old_file in PATCHED_DIR.glob("cli-*.js"):
-        if old_file != patched_path:
-            try:
-                old_file.unlink()
-            except OSError:
-                pass
-
-    # Copy source to patched location
-    shutil.copy2(cli_path, patched_path)
+    # Copy source to patched location with hash marker after shebang
+    content = cli_path.read_text()
+    # Insert hash marker after the shebang line
+    if content.startswith('#!'):
+        newline_idx = content.index('\n')
+        content = content[:newline_idx + 1] + hash_marker + '\n' + content[newline_idx + 1:]
+    else:
+        content = hash_marker + '\n' + content
+    patched_path.write_text(content)
 
     # Apply patches (no backup needed - we have the original)
     success, msg = apply_patch(patched_path, dry_run=False, create_backup=False)
@@ -591,9 +633,9 @@ def main():
 
     if args.check:
         content = cli_path.read_text()
-        trigger_patched, display_patched, pct_base_patched, hook_reply_patched = check_already_patched(content)
+        trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
 
-        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched:
+        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched:
             print(f"OK: Fully patched ({cli_path})")
             sys.exit(0)
 
@@ -628,14 +670,26 @@ def main():
         if hook_reply_patched:
             status.append("hook_reply: OK")
         else:
-            if HOOK_ERROR_OPEN in content:
+            # Check if any error patterns exist
+            has_error_pattern = any(error_pat in content for error_pat, _ in HOOK_PATTERNS)
+            if has_error_pattern:
                 status.append("hook_reply: NEEDS PATCH")
             else:
                 status.append("hook_reply: pattern not found")
 
+        if hook_is_error_patched:
+            status.append("hook_is_error: OK")
+        else:
+            # Check if any is_error patterns exist
+            has_is_error_pattern = any(error_pat in content for error_pat, _ in HOOK_IS_ERROR_PATTERNS)
+            if has_is_error_pattern:
+                status.append("hook_is_error: NEEDS PATCH")
+            else:
+                status.append("hook_is_error: pattern not found")
+
         print(f"Status: {'; '.join(status)}")
-        # Core patches are trigger and hook_reply; display and pct_base are optional
-        fully_patched = trigger_patched and hook_reply_patched
+        # Core patches are trigger, hook_reply, hook_is_error; display and pct_base are optional
+        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched
         sys.exit(0 if fully_patched else 1)
 
     elif args.restore:
@@ -655,9 +709,9 @@ def main():
             # Continue to exec if remainder provided
         else:
             content = cli_path.read_text()
-            trigger_patched, display_patched, pct_base_patched, hook_reply_patched = check_already_patched(content)
-            # Core patches are trigger and hook_reply
-            if trigger_patched and hook_reply_patched:
+            trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
+            # Core patches are trigger, hook_reply, and hook_is_error
+            if trigger_patched and hook_reply_patched and hook_is_error_patched:
                 cache[file_hash] = "patched"
                 save_cache(cache)
                 if not args.auto:
