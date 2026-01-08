@@ -1,10 +1,10 @@
 # Claude Context Manager
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
-[![Claude Code](https://img.shields.io/badge/claude--code-2.0.75-purple.svg)](https://claude.ai/claude-code)
+[![Claude Code](https://img.shields.io/badge/claude--code-2.0.75--2.1.x-purple.svg)](https://claude.ai/claude-code)
 
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
 
@@ -27,6 +27,32 @@ This system intercepts tool calls to manage context proactively:
 3. **Delegate to subagents** - Task agents access full content without polluting main context
 4. **External compaction** - Route summarization to cheaper external LLMs via OpenRouter
 5. **Purge on demand** - `/purge` command truncates old outputs
+
+## Compatibility
+
+### Claude Code 2.1.x
+
+CCM is compatible with Claude Code 2.1.x. The `c` launch command automatically patches the CLI to fix several issues:
+
+| Patch | Issue | Fix |
+|-------|-------|-----|
+| **Trigger** | `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` uses `Math.min` - can only lower threshold | Changed to `Math.max` - allows raising threshold |
+| **Display** | `/context` buffer display ignores env var override | Now uses same threshold function as trigger |
+| **Pct Base** | Percentage calculated from available context (136k) not total (200k) | Now calculates from total context window |
+| **Hook Reply** | Hook block responses shown as "error" | Changed to "reply" for clarity |
+
+The patched CLI is stored in `~/.claude/patched/` to survive auto-updates. The `c` command automatically detects CLI updates and re-patches as needed.
+
+**Manual patch operations:**
+```bash
+~/.claude/hooks/patch-autocompact.py --check       # Check patch status
+~/.claude/hooks/patch-autocompact.py --get-patched # Get/create patched CLI
+rm ~/.claude/patched/cli-ccm-*.js && c             # Force re-patch
+```
+
+### Claude Code 2.0.75+
+
+Works without patches. Original target version.
 
 ## Requirements
 
@@ -69,11 +95,12 @@ c -p "do something"         # Run with prompt
 
 What `c` does:
 1. Starts the thinking proxy (if not running)
-2. Runs `claude` with env vars scoped to that process only:
+2. Patches CLI if needed (for 2.1.x compatibility)
+3. Runs `claude` with env vars scoped to that process only:
    - `ANTHROPIC_BASE_URL` - Routes through proxy
    - `ANTHROPIC_CUSTOM_HEADERS` - Session ID for tracking
    - `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE` - Compaction threshold
-3. Adds `--dangerously-skip-permissions`
+4. Adds `--dangerously-skip-permissions`
 
 No terminal pollution - env vars are only set for the claude process.
 
@@ -211,9 +238,11 @@ Compaction debug files:
 │   ├── learn-large-commands.py # Pattern learning
 │   ├── pre-compact.py         # Custom compaction instructions
 │   ├── thinking-proxy.py      # Thinking block proxy
+│   ├── patch-autocompact.py   # CLI patcher for 2.1.x
 │   ├── claude-session-purge.py # Session purge tool
 │   ├── config.py              # Configuration
 │   └── lib/                   # Shared libraries
+├── patched/                   # Patched CLI copies (2.1.x)
 ├── commands/
 │   ├── purge.md               # /purge slash command
 │   └── ccm.md                 # /ccm slash command
@@ -264,16 +293,23 @@ Once installed, hooks work automatically:
 - **Large outputs** (>2KB) are cached to `~/.claude/cache/`
 - **Subagent calls** bypass interception (full access for Task agents)
 
-When you see a cache reference:
+When you see a cache stub:
 ```
-Cached (1523 lines, 45678 bytes, exit 0).
-File: ~/.claude/cache/a1b2c3d4
+[CCM_CACHED]
+key: sha256:abc123...
+source: Bash cat ~/.bashrc
+bytes: 45678
+~tokens: 11k
+lines: 1234
+pinned: none
+see: CLAUDE.md → CCM:RETRIEVAL-GUIDANCE
+[/CCM_CACHED]
 ```
 
 Options:
-1. Spawn a Task agent to summarize or extract from the cached file
-2. Use offset/limit parameters to paginate the original
-3. Have a Task agent return full content if truly needed
+1. Spawn a Task agent to summarize or extract specific information
+2. Use offset/limit parameters to paginate the original read
+3. Retrieve full content if truly needed: `~/.claude/hooks/ccm-get.py <key>`
 
 ### Context Warnings
 
@@ -294,6 +330,8 @@ When context is critical, run `/purge` to:
 ### Auto-Compaction Control
 
 Compaction triggers at 95% context by default (configurable via `COMPACT_PCT` or `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`).
+
+With the 2.1.x patches, this means 95% of the **total** 200k context window (190k tokens), not 95% of available context.
 
 ### Custom Compaction Instructions
 
@@ -377,6 +415,12 @@ rm -rf ~/.claude/cache/*
 tail -f ~/.claude/proxy.log
 ```
 
+### Re-patch CLI after update
+```bash
+rm ~/.claude/patched/cli-ccm-*.js
+c  # Will auto-patch on next launch
+```
+
 ## Documentation
 
 - Full documentation: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
@@ -385,3 +429,5 @@ tail -f ~/.claude/proxy.log
 ## License
 
 MIT
+
+Jimovo
