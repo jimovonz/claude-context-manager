@@ -435,7 +435,8 @@ tail -f ~/.claude/proxy.log
 
 ## Documentation
 
-- Full documentation: `~/.claude/hooks/CONTEXT_MANAGEMENT.md`
+- Context management: `hooks/CONTEXT_MANAGEMENT.md`
+- CLI patching & skills: `docs/CLI_PATCHING.md`
 - External compaction: `docs/EXTERNAL_COMPACTION.md`
 
 ## License
