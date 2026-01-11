@@ -126,12 +126,35 @@ Secondary: [optional, max 2 active threads]
 - [ ] task with enough context to execute
 - [ ] next task
 
+### User-Provided Context
+CRITICAL - Preserve ALL user-provided information:
+- Paths: directories, files, URLs the user mentioned
+- Credentials/Access: API keys, endpoints, auth methods (redact secrets but note they exist)
+- Tools/Commands: what the user said works, preferred tools
+- Environment: OS, versions, constraints mentioned
+- Preferences: coding style, conventions, approaches they want
+
+### Code Changes Made
+For each modified file:
+- /path/to/file.py: what changed and why (include key code snippets)
+
+### Key Reasoning
+- Why approach X was chosen over Y
+- What was learned from failures
+- What works vs what doesn't (preserve troubleshooting discoveries)
+
 ### Decisions & Constraints
 - Decision made — why, what was rejected
 
 ### Current State
 - What's done vs in-progress
 - Blockers if any
+
+### Session Timeline
+Key events in order:
+- [early] what was established
+- [mid] major changes/discoveries
+- [recent] current focus
 
 ### Dead Ends
 - Parked thread — one line why
@@ -158,11 +181,11 @@ For the ARTEFACTS section, output only changes:
 If nothing changed: "STABLE: [all items]"
 
 LENGTH REQUIREMENTS:
-- ARTEFACTS section: minimum 2000 tokens (include ALL code, commands, errors)
-- DISTILLATION section: minimum 1500 tokens (comprehensive, not sparse)
-- Total output: minimum 4000 tokens
+- ARTEFACTS section: minimum 4000 tokens (include ALL code, commands, errors)
+- DISTILLATION section: minimum 4000 tokens (comprehensive, not sparse)
+- Total output: minimum 8000 tokens
 
-A 2000 token output for a 150k conversation is a FAILURE.
+A sparse output for a large conversation is a FAILURE. When in doubt, include more detail.
 
 === END OF INSTRUCTIONS ===
 
@@ -308,6 +331,18 @@ THINKING_PROXY_PORT = 8080
 # Enable debug logging (writes detailed request/response info to proxy-debug.log)
 THINKING_PROXY_DEBUG_LOG = False
 
+# Available skills (from ~/.claude/commands/):
+#   ccm: Context Manager (CCM) command.
+#   pin-end: End the current pin range started by /pin-start.
+#   pin-last: Emit a pin directive to preserve the most recent large to...
+#   pin-next: Emit a pin directive to preserve the next large tool outp...
+#   pin-start: Start a pin range - all large tool outputs until /pin-end...
+#   relay: SSH Relay for persistent remote connections.
+
+# Skills to preserve in abbreviated system prompt (by name)
+# These are extracted from the system prompt and appended to the abbreviated version
+PRESERVED_SKILLS = ['relay', 'ccm']
+
 # =============================================================================
 # External Compaction Settings
 # =============================================================================
@@ -359,3 +394,7 @@ COMPACTION_MAX_TOKENS = {
     # Gemini 3 Pro caps at 64k output
     'default': 64000
 }
+
+# Preserve recent messages: exclude last N tokens from compaction, append verbatim
+# This keeps recent context exact (no summarization loss) while compacting older content
+COMPACTION_PRESERVE_TOKENS = 10000

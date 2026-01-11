@@ -40,8 +40,10 @@ try:
         OPENROUTER_API_BASE,
         COMPACTION_MODELS,
         COMPACTION_MAX_TOKENS,
+        COMPACTION_PRESERVE_TOKENS,
         COMPACT_INSTRUCTIONS,
         COMPACT_INSTRUCTIONS_SINGLE_PASS,
+        PRESERVED_SKILLS,
     )
 except ImportError:
     THINKING_PROXY_PORT = 8080
@@ -51,10 +53,12 @@ except ImportError:
     OPENROUTER_API_BASE = 'https://openrouter.ai/api/v1'
     COMPACTION_MODELS = {'early': 'google/gemini-2.0-flash-lite-001', 'late': 'google/gemini-2.0-flash-001'}
     COMPACTION_MAX_TOKENS = {1: 20000, 2: 36000, 3: 52000, 4: 68000, 5: 84000, 'default': 100000}
+    COMPACTION_PRESERVE_TOKENS = 10000
     COMPACT_INSTRUCTIONS = """Summarize this conversation for context continuity.
 Preserve: current task, key decisions, file paths, pending actions, errors being investigated.
 Be concise. Prioritize actionable context over history."""
     COMPACT_INSTRUCTIONS_SINGLE_PASS = COMPACT_INSTRUCTIONS
+    PRESERVED_SKILLS = ['relay', 'ccm', 'pin-next', 'pin-last', 'pin-start', 'pin-end']
 
 # Paths
 CLAUDE_DIR = Path.home() / '.claude'
@@ -126,6 +130,15 @@ ABBREVIATED_SYSTEM_PROMPT = """You are an interactive CLI assistant that helps u
 - If blocked, explain why and propose next steps. Never silently stop.
 - If a bash command will not terminate, run it in the background and return to the user.
 - Be concise. Do not repeat planning statements. State intent once, then act.
+
+# CCM slash commands
+/ccm --purge|-p    Run: ~/.claude/hooks/claude-session-purge.py --current --verbose --restart
+/ccm --repair|-r   Run: ~/.claude/hooks/claude-session-purge.py --current --repair-only --verbose --restart
+/ccm --status|-s   Run: python3 -c "import sys; sys.path.insert(0,'$HOME/.claude/hooks'); from lib.ccm_cache import get_cache_stats; s=get_cache_stats(); print(f'Items: {s.get(\"total_items\",0)}, Size: {s.get(\"total_bytes_compressed\",0):,} bytes')"
+/pin-last          Emit in response: ccm:pin last level=soft
+/pin-next          Emit in response: ccm:pin next level=soft
+/pin-start         Emit in response: ccm:pin start level=soft
+/pin-end           Emit in response: ccm:pin end
 """
 
 # Abbreviated tool descriptions - Level 2: Params only
@@ -488,6 +501,118 @@ class ExternalCompactionHandler:
             result.append(msg_copy)
         return result
 
+    def estimate_message_tokens(self, msg: dict) -> int:
+        """Estimate token count for a message.
+
+        Uses ~4 chars per token approximation. Includes all content blocks.
+        """
+        content = msg.get('content', [])
+        total_chars = 0
+
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block_type = block.get('type', '')
+                    if block_type == 'text':
+                        total_chars += len(block.get('text', ''))
+                    elif block_type == 'tool_use':
+                        # Estimate tool_use size
+                        total_chars += len(json.dumps(block.get('input', {})))
+                    elif block_type == 'tool_result':
+                        result_content = block.get('content', '')
+                        if isinstance(result_content, list):
+                            for b in result_content:
+                                if isinstance(b, dict):
+                                    total_chars += len(b.get('text', ''))
+                        else:
+                            total_chars += len(str(result_content))
+                elif isinstance(block, str):
+                    total_chars += len(block)
+        else:
+            total_chars = len(str(content))
+
+        # ~4 chars per token approximation
+        return total_chars // 4
+
+    def split_messages_for_preservation(self, messages: list, preserve_tokens: int) -> tuple[list, list]:
+        """Split messages into (to_summarize, to_preserve).
+
+        Walks backwards through messages, preserving up to preserve_tokens.
+        Returns (messages_to_summarize, messages_to_preserve).
+        """
+        if preserve_tokens <= 0:
+            return messages, []
+
+        preserved = []
+        token_count = 0
+
+        for msg in reversed(messages):
+            msg_tokens = self.estimate_message_tokens(msg)
+            if token_count + msg_tokens > preserve_tokens:
+                break
+            preserved.insert(0, msg)
+            token_count += msg_tokens
+
+        if not preserved:
+            return messages, []
+
+        # Split point
+        split_idx = len(messages) - len(preserved)
+        to_summarize = messages[:split_idx]
+
+        logger.info(f"Preservation split: {len(to_summarize)} msgs to summarize, {len(preserved)} msgs preserved (~{token_count} tokens)")
+
+        return to_summarize, preserved
+
+    def format_preserved_messages(self, messages: list) -> str:
+        """Format preserved messages for appending to compaction output.
+
+        Creates a clearly marked section with the verbatim recent conversation.
+        """
+        if not messages:
+            return ""
+
+        parts = ["\n\n=== PRESERVED RECENT CONTEXT (verbatim) ===\n"]
+
+        for msg in messages:
+            role = msg.get('role', 'unknown').upper()
+            content = msg.get('content', [])
+
+            parts.append(f"\n[{role}]")
+
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict):
+                        block_type = block.get('type', '')
+                        if block_type == 'text':
+                            parts.append(block.get('text', ''))
+                        elif block_type == 'tool_use':
+                            name = block.get('name', 'unknown')
+                            inp = block.get('input', {})
+                            # Compact representation
+                            if 'command' in inp:
+                                parts.append(f"[Tool: {name}] {inp['command'][:200]}")
+                            elif 'file_path' in inp:
+                                parts.append(f"[Tool: {name}] {inp['file_path']}")
+                            else:
+                                parts.append(f"[Tool: {name}]")
+                        elif block_type == 'tool_result':
+                            result_content = block.get('content', '')
+                            if isinstance(result_content, list):
+                                texts = [b.get('text', '') for b in result_content
+                                        if isinstance(b, dict) and b.get('type') == 'text']
+                                parts.append('\n'.join(texts))
+                            else:
+                                parts.append(str(result_content))
+                    elif isinstance(block, str):
+                        parts.append(block)
+            else:
+                parts.append(str(content))
+
+        parts.append("\n=== END PRESERVED CONTEXT ===")
+
+        return '\n'.join(parts)
+
     def select_model(self, session_id: str) -> tuple[str, int]:
         """Select model based on compaction count.
 
@@ -755,6 +880,8 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
 
         Single pass generates both artefacts and distillation together.
         We then append the extracted artefacts at the end to guarantee preservation.
+        Recent messages (up to COMPACTION_PRESERVE_TOKENS) are excluded from
+        summarization and appended verbatim to preserve exact recent context.
 
         Returns (async_generator, should_mark_no_thinking).
         The generator yields bytes in Claude SSE format.
@@ -764,15 +891,26 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
 
         logger.info(f"External compaction {count} for session {session_id} using {model} (max_tokens={max_tokens})")
 
+        # Split messages: preserve recent, summarize the rest
+        original_messages = body.get('messages', [])
+        to_summarize, preserved_messages = self.split_messages_for_preservation(
+            original_messages, COMPACTION_PRESERVE_TOKENS
+        )
+
+        # Create modified body with only messages to summarize
+        compaction_body = body.copy()
+        compaction_body['messages'] = to_summarize
+
         # Get previous artefacts for delta mode
         prev_artefacts = self.previous_artefacts.get(session_id, 'None (first compaction)')
 
         # Build single-pass prompt with previous artefacts
         system_prompt = COMPACT_INSTRUCTIONS_SINGLE_PASS.replace('{previous_artefacts}', prev_artefacts)
 
-        # Transform request for OpenRouter (streaming)
-        openrouter_request = self.claude_to_openai(body, model, max_tokens,
-                                                    system_prompt=system_prompt, stream=True)
+        # Transform request for OpenRouter (streaming, flattened to avoid role confusion)
+        openrouter_request = self.claude_to_openai(compaction_body, model, max_tokens,
+                                                    system_prompt=system_prompt, stream=True,
+                                                    flatten_conversation=True, artefacts="(single-pass mode)")
 
         logger.debug(f"OpenRouter request: {json.dumps(openrouter_request, indent=2)[:2000]}...")
 
@@ -852,13 +990,15 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
                         # Write extracted artefacts to file for inspection
                         artefacts_file = CLAUDE_DIR / 'last-artefacts.txt'
                         artefacts_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{extracted_artefacts}")
+                        # Note: artefacts already in LLM output (single-pass), no need to append again
 
-                        # Append artefacts at the end to guarantee preservation
-                        artefact_section = f"\n\n=== PRESERVED ARTEFACTS ===\n{extracted_artefacts}"
-                        total_chars[0] += len(artefact_section)
-                        collected_content.append(artefact_section)
-                        yield self._content_block_delta_event(artefact_section)
-                        logger.info(f"Appended artefacts ({len(extracted_artefacts)} chars)")
+                    # Append preserved recent messages (verbatim, no summarization)
+                    if preserved_messages:
+                        preserved_section = self.format_preserved_messages(preserved_messages)
+                        total_chars[0] += len(preserved_section)
+                        collected_content.append(preserved_section)
+                        yield self._content_block_delta_event(preserved_section)
+                        logger.info(f"Appended {len(preserved_messages)} preserved messages ({len(preserved_section)} chars)")
 
                     # Write complete output to file for inspection
                     output_file = CLAUDE_DIR / 'last-distillation.txt'
@@ -964,7 +1104,7 @@ def run_proxy(port: int, debug: bool):
         def _abbreviate_system_prompt(self, body: bytes) -> bytes:
             """Replace verbose system prompt with abbreviated version.
 
-            Preserves dynamic content like environment info and CLAUDE.md.
+            Preserves dynamic content like environment info, CLAUDE.md, and slash commands.
             """
             if not ABBREVIATED_SYSTEM_PROMPT:
                 return body
@@ -988,9 +1128,26 @@ def run_proxy(port: int, debug: bool):
                 text = block.get('text', '')
                 # The main instructions block starts with "\nYou are an interactive CLI tool"
                 if 'You are an interactive CLI tool' in text or 'software engineering tasks' in text:
+                    import re
+                    extracted_skills = []
+
+                    # Extract whitelisted skills from system prompt
+                    # Skills are typically formatted as: /skill-name\nDescription...
+                    for skill_name in PRESERVED_SKILLS:
+                        # Match /skill-name followed by content until next /command or section
+                        pattern = rf'(/{re.escape(skill_name)}\n.*?)(?=\n/[a-z]|\n## |\n# |\Z)'
+                        match = re.search(pattern, text, re.DOTALL | re.IGNORECASE)
+                        if match:
+                            extracted_skills.append(match.group(1).strip())
+
+                    # Build extracted sections string
+                    extracted_sections = ''
+                    if extracted_skills:
+                        extracted_sections = '\n\n# Skills\n' + '\n\n'.join(extracted_skills)
+
                     # Preserve cache_control if present
                     cache_control = block.get('cache_control')
-                    system[i] = {'type': 'text', 'text': ABBREVIATED_SYSTEM_PROMPT}
+                    system[i] = {'type': 'text', 'text': ABBREVIATED_SYSTEM_PROMPT + extracted_sections}
                     if cache_control:
                         system[i]['cache_control'] = cache_control
                     modified = True

@@ -17,6 +17,12 @@ Patches applied:
    The CLI displays these as <error> which is misleading since the hook succeeded.
    This patch changes the tag to <reply>.
 
+4. FILE INJECTION PATCH: Prevent full file content in system-reminders
+   When external processes modify files Claude has read, the CLI injects the
+   entire diff into context via system-reminders. For large files or complete
+   rewrites, this can be huge (2x file size) and cause 413 errors.
+   This patch replaces the diff with a short notification.
+
 Usage:
     # Check if patch is needed
     ./patch-autocompact.py --check
@@ -64,6 +70,10 @@ HOOK_PATTERNS = [
 # Hook is_error patch - DISABLED for v2.0.76+ (patterns changed)
 # The minified code structure changed; these patterns no longer exist
 HOOK_IS_ERROR_PATTERNS = []
+
+# File injection patch - replace diff injection with minimal notification
+# The pattern spans two lines due to template literal with embedded newline
+FILE_INJECTION_NOTIFICATION = 'Note: ${A.filename} was modified externally. Use Read tool if needed.'
 
 
 def find_cli_path() -> Path | None:
@@ -196,16 +206,17 @@ def find_autocompact_mathmin(content: str) -> tuple[int, int, str] | None:
     return None
 
 
-def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool]:
+def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, bool]:
     """Check if the file is already patched.
 
-    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched)
+    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched)
     """
     trigger_patched = False
     display_patched = False
     pct_base_patched = False
     hook_reply_patched = False
     hook_is_error_patched = False
+    file_injection_patched = False
 
     # Check trigger patch: Math.max in autocompact function
     env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
@@ -227,23 +238,26 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool]:
 
     # Check display patch: ET2() instead of EHA()-bH0
     # Patched pattern: c=s?FUNC():void 0 (single function call, no subtraction)
-    patched_display = r',c=s\?[A-Za-z0-9_$]+\(\):void 0'
+    patched_display = r',[a-z]=[a-z]\?[A-Za-z0-9_$]+\(\):void 0,'
     if re.search(patched_display, content):
         display_patched = True
 
-    # Check percentage base patch: NO(p3())*(G/100) instead of A*(G/100)
+    # Check percentage base patch: CONTEXT(MODEL(),OTHER())*(G/100) instead of A*(G/100)
     # This ensures percentage is of total context (200k) not available (136k)
     pct_base_patched = False
-    # Look for the patched pattern near AUTOCOMPACT
-    env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
-    for match in re.finditer(env_pattern, content):
-        window_start = max(0, match.start() - 100)
-        window_end = min(len(content), match.start() + 500)
-        window = content[window_start:window_end]
-        # Check for patched pattern: NO(FUNC())*(G/100)
-        if re.search(r'[A-Za-z0-9_$]+\([A-Za-z0-9_$]+\(\)\)\*\([A-Z]/100\)', window):
-            pct_base_patched = True
-            break
+    # Look for the patched pattern near AUTOCOMPACT - dynamically built
+    total_context_call = find_total_context_call(content)
+    if total_context_call:
+        env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
+        for match in re.finditer(env_pattern, content):
+            window_start = max(0, match.start() - 100)
+            window_end = min(len(content), match.start() + 500)
+            window = content[window_start:window_end]
+            # Check for patched pattern: TOTAL_CONTEXT_CALL*(G/100)
+            escaped_call = re.escape(total_context_call)
+            if re.search(escaped_call + r'\*\([A-Z]/100\)', window):
+                pct_base_patched = True
+                break
 
     # Check hook reply patch: "error" → "reply" in hook blocking messages
     # Patched if all error patterns are replaced with reply patterns
@@ -263,7 +277,10 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool]:
             hook_is_error_patched = False
             break
 
-    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched)
+    # Check file injection patch: minimal notification instead of full diff
+    file_injection_patched = check_file_injection_patched(content)
+
+    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched)
 
 
 def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
@@ -277,7 +294,7 @@ def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
     """
     # Pattern: ,c=s?FUNC()-CONST:void 0,
     # where FUNC is some function and CONST is hardcoded buffer constant
-    pattern = r',c=s\?([A-Za-z0-9_$]+)\(\)-[A-Za-z0-9_$]+:void 0,'
+    pattern = r',([a-z])=([a-z])\?([A-Za-z0-9_$]+)\(\)-[A-Za-z0-9_$]+:void 0,'
 
     match = re.search(pattern, content)
     if match:
@@ -290,18 +307,78 @@ def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
     return None
 
 
+def find_total_context_call(content: str) -> str | None:
+    """
+    Dynamically find the total context function call by tracing through the code.
+
+    Structure in CLI:
+        function THRESHOLD_FUNC(){
+            let A=AVAILABLE_FUNC(), ...
+            ...Math.floor(A*(G/100))...
+        }
+        function AVAILABLE_FUNC(){
+            let A=MODEL_FUNC(), Q=SYS_FUNC(A);
+            return CONTEXT_FUNC(A,OTHER_FUNC())-Q
+        }
+
+    We want: CONTEXT_FUNC(MODEL_FUNC(),OTHER_FUNC()) for total context.
+    """
+    # Step 1: Find threshold function (contains AUTOCOMPACT_PCT_OVERRIDE)
+    env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
+    env_match = re.search(env_pattern, content)
+    if not env_match:
+        return None
+
+    # Step 2: Find the function definition containing env var
+    # Look backwards for "function NAME(){"
+    window_start = max(0, env_match.start() - 500)
+    window = content[window_start:env_match.start()]
+    func_def_match = re.search(r'function\s+([A-Za-z0-9_$]+)\(\)\{[^}]*$', window)
+    if not func_def_match:
+        return None
+
+    threshold_func = func_def_match.group(1)
+
+    # Step 3: Find "let A=FUNC()" at start of threshold function to get available context func
+    # Pattern: function THRESHOLD(){let A=AVAILABLE()
+    threshold_pattern = rf'function\s+{re.escape(threshold_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\)'
+    threshold_match = re.search(threshold_pattern, content)
+    if not threshold_match:
+        return None
+
+    available_func = threshold_match.group(2)
+
+    # Step 4: Find available context function definition
+    # Pattern: function AVAILABLE(){let A=MODEL(),Q=SYS(A);return CONTEXT(A,OTHER())-Q}
+    available_pattern = rf'function\s+{re.escape(available_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\),([A-Z])=([A-Za-z0-9_$]+)\(\1\);return\s+([A-Za-z0-9_$]+)\(\1,([A-Za-z0-9_$]+)\(\)\)-\3\}}'
+    available_match = re.search(available_pattern, content)
+    if not available_match:
+        return None
+
+    model_func = available_match.group(2)      # H3
+    context_func = available_match.group(5)    # Lz
+    other_func = available_match.group(6)      # Iw
+
+    # Step 5: Build total context call
+    return f"{context_func}({model_func}(),{other_func}())"
+
+
 def find_pct_base_pattern(content: str) -> tuple[int, int, str, str, str] | None:
     """
     Find the percentage base pattern in the autocompact calculation.
 
     Looking for: Math.floor(A*(G/100)) near AUTOCOMPACT_PCT_OVERRIDE
-    where A is the available context variable (EHA result).
+    where A is the available context variable.
 
-    We need to replace A with NO(p3()) to use total context instead of available.
-    The NO and p3 functions are defined in EHA(), which is called by ET2().
+    Dynamically discovers the total context function call to use as replacement.
 
-    Returns: (start_offset, end_offset, matched_string, context_func, pct_var) or None
+    Returns: (start_offset, end_offset, matched_string, replacement_base, pct_var) or None
     """
+    # First, dynamically find the total context call
+    total_context_call = find_total_context_call(content)
+    if not total_context_call:
+        return None
+
     # Find the AUTOCOMPACT_PCT_OVERRIDE location
     env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
     env_matches = list(re.finditer(env_pattern, content))
@@ -313,32 +390,16 @@ def find_pct_base_pattern(content: str) -> tuple[int, int, str, str, str] | None
         window_end = min(len(content), env_pos + 500)
         window = content[window_start:window_end]
 
-        # Pattern: Math.floor(VAR*(VAR/100))
-        # VAR is single letter (minified)
+        # Pattern: Math.floor(A*(G/100)) - simple single-letter vars
         pct_pattern = r'Math\.floor\(([A-Z])\*\(([A-Z])/100\)\)'
         match = re.search(pct_pattern, window)
         if match:
-            pct_var = match.group(2)   # The percentage variable (G)
+            base_var = match.group(1)  # A (available context)
+            pct_var = match.group(2)   # G (percentage)
 
-            # Find the context window function in EHA definition
-            # Look further back for: function EHA(){let A=p3()...return NO(A)
-            backward_start = max(0, env_pos - 600)
-            backward_window = content[backward_start:env_pos]
-
-            # Find the EHA-like function pattern: let VAR=FUNC(),...return FUNC2(VAR)
-            # Example: function EHA(){let A=p3(),Q=fH0(A);return NO(A)-Q}
-            # Use non-greedy match and word boundary for the function name
-            eha_pattern = r'let\s+([A-Z])=([A-Za-z0-9_$]+)\(\).*?return\s+([A-Za-z0-9_$]+)\(\1\)'
-            eha_match = re.search(eha_pattern, backward_window)
-
-            if eha_match:
-                model_func = eha_match.group(2)  # e.g., p3
-                context_func = eha_match.group(3)  # e.g., NO
-                full_context_call = f"{context_func}({model_func}())"
-
-                abs_start = window_start + match.start()
-                abs_end = window_start + match.end()
-                return (abs_start, abs_end, match.group(), full_context_call, pct_var)
+            abs_start = window_start + match.start()
+            abs_end = window_start + match.end()
+            return (abs_start, abs_end, match.group(), total_context_call, pct_var)
 
     return None
 
@@ -365,14 +426,45 @@ def find_threshold_function_name(content: str) -> str | None:
     return None
 
 
+def find_file_injection_pattern(content: str) -> tuple[int, int, str, str, str] | None:
+    """
+    Find the file injection pattern in the CLI.
+
+    Looking for: case"edited_text_file":return XX([YY({content:`Note: ${A.filename} was modified...
+    ...${A.snippet}`,isMeta:!0})]);
+
+    Where XX and YY are minified function names (e.g., V5, F5, $0, C0).
+
+    Returns: (start_offset, end_offset, matched_string, func1, func2) or None
+    """
+    # The pattern includes a template literal with embedded newline
+    # We need to match from case"edited_text_file" to the closing ])]);
+    # Use flexible function name matching for minified code
+    pattern = r'case"edited_text_file":return ([A-Z0-9]+)\(\[([A-Z0-9]+)\(\{content:`[^`]*\$\{A\.snippet\}`,[^)]+\)\]\)'
+
+    match = re.search(pattern, content, re.DOTALL)
+    if match:
+        return (match.start(), match.end(), match.group(), match.group(1), match.group(2))
+
+    return None
+
+
+def check_file_injection_patched(content: str) -> bool:
+    """Check if file injection is already patched (uses minimal notification)."""
+    # Check if the patched pattern exists - use flexible function names
+    patched_pattern = r'case"edited_text_file":return [A-Z0-9]+\(\[[A-Z0-9]+\(\{content:`Note: \$\{A\.filename\} was modified externally\. Use Read tool if needed\.`'
+    return bool(re.search(patched_pattern, content))
+
+
 def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = True) -> tuple[bool, str]:
     """
     Apply all patches:
     1. Math.min → Math.max (trigger)
     2. Display calculation (EHA()-bH0 → ET2())
-    3. Percentage base (A*(G/100) → NO(p3())*(G/100))
+    3. Percentage base (A*(G/100) → TOTAL_CONTEXT*(G/100))
     4. Hook reply (<error> → <reply>)
     5. Hook is_error (is_error:!0 → is_error:!1)
+    6. File injection (full diff → minimal notification)
 
     Returns: (success, message)
     """
@@ -380,9 +472,9 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     messages = []
 
     # Check current patch status
-    trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
+    trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
 
-    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched:
+    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
         return (True, "Already fully patched")
 
     # Create backup if it doesn't exist (only for in-place patching)
@@ -414,7 +506,11 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
         if display_result:
             start, end, matched, threshold_func = display_result
             # Replace: ,c=s?EHA()-bH0:void 0, → ,c=s?ET2():void 0,
-            replacement = f',c=s?{threshold_func}():void 0,'
+            # Re-match to get captured groups, fall back to generic names
+            import re as re2
+            m = re2.search(r',([a-z])=([a-z])\?', matched)
+            var1, var2 = (m.group(1), m.group(2)) if m else ('e', 't')
+            replacement = f',{var1}={var2}?{threshold_func}():void 0,'
 
             if dry_run:
                 messages.append(f"Would patch display: {matched[:30]}... → {replacement}")
@@ -477,6 +573,24 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     else:
         messages.append("Hook is_error already patched")
 
+    # Patch 6: File injection (full diff → minimal notification)
+    if not file_injection_patched:
+        injection_result = find_file_injection_pattern(content)
+        if injection_result:
+            start, end, matched, func1, func2 = injection_result
+            # Replace with minimal notification, preserving the minified function names
+            replacement = f'case"edited_text_file":return {func1}([{func2}({{content:`{FILE_INJECTION_NOTIFICATION}`,isMeta:!0}})])'
+
+            if dry_run:
+                messages.append(f"Would patch file injection: {len(matched)} chars → {len(replacement)} chars")
+            else:
+                content = content[:start] + replacement + content[end:]
+                messages.append("Patched file injection: diff→notification")
+        else:
+            messages.append("File injection pattern not found (may be different CLI version)")
+    else:
+        messages.append("File injection already patched")
+
     if dry_run:
         return (True, "; ".join(messages))
 
@@ -485,11 +599,11 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
 
     # Verify
     verify_content = cli_path.read_text()
-    trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok = check_already_patched(verify_content)
+    trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok, file_injection_ok = check_already_patched(verify_content)
 
-    # Core patches: trigger, hook_reply, hook_is_error are essential
+    # Core patches: trigger, hook_reply, hook_is_error, file_injection are essential
     # Display and pct_base are optional (may not match on all versions)
-    if trigger_ok and hook_ok and hook_is_error_ok:
+    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_ok:
         return (True, "; ".join(messages))
     else:
         # Restore backup if we created one
@@ -504,9 +618,10 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     """
     Get path to a patched CLI copy.
 
-    Creates a patched copy alongside the original CLI (same directory) so that
-    __dirname-based path resolution works correctly for command discovery.
-    The patched copy is named cli-ccm.js in the same directory as cli.js.
+    Creates a patched copy in ~/.claude/patched/ to survive auto-updates.
+    The patched copy is named cli-ccm-{hash}.js where hash identifies the source version.
+
+    __dirname in the CLI is hardcoded at build time, so location doesn't matter.
 
     Returns: (patched_path, message) or (None, error_message)
     """
@@ -519,22 +634,28 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     if not cli_path.exists():
         return (None, f"CLI not found at {cli_path}")
 
-    # Patched copy lives alongside original for correct path resolution
-    patched_path = cli_path.parent / "cli-ccm.js"
-
     # Compute source hash to detect CLI updates
     source_hash = get_file_hash(cli_path)
     hash_marker = f"// CCM-PATCHED: {source_hash}"
+
+    # Patched copy lives in ~/.claude/patched/ to survive auto-updates
+    PATCHED_DIR.mkdir(parents=True, exist_ok=True)
+    patched_path = PATCHED_DIR / f"cli-ccm-{source_hash}.js"
 
     if patched_path.exists():
         content = patched_path.read_text()
         # Check if it's our patched version and matches current source
         if hash_marker in content[:500]:  # Check near start of file
-            trigger_ok, display_ok, pct_ok, hook_ok = check_already_patched(content)
-            if trigger_ok and hook_ok:  # display and pct are optional
+            trigger_ok, display_ok, pct_ok, hook_ok, hook_err_ok, file_inj_ok = check_already_patched(content)
+            if trigger_ok and hook_ok and file_inj_ok:  # display and pct are optional
                 return (patched_path, "Using cached patched CLI")
-        # Stale or invalid, remove it
+        # Invalid patch, remove it
         patched_path.unlink()
+
+    # Clean up old patched versions (different hash)
+    for old_file in PATCHED_DIR.glob("cli-ccm-*.js"):
+        if old_file != patched_path:
+            old_file.unlink()
 
     # Copy source to patched location with hash marker after shebang
     content = cli_path.read_text()
@@ -550,6 +671,11 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     success, msg = apply_patch(patched_path, dry_run=False, create_backup=False)
 
     if success:
+        # Also update skills config when creating new patched CLI
+        try:
+            update_skills_config(quiet=True)
+        except Exception:
+            pass  # Non-critical, don't fail the patch
         return (patched_path, f"Created patched CLI: {msg}")
     else:
         # Clean up failed patch
@@ -566,6 +692,78 @@ def restore_backup(cli_path: Path) -> tuple[bool, str]:
 
     shutil.copy2(backup_path, cli_path)
     return (True, f"Restored from {backup_path}")
+
+
+def update_skills_config(quiet: bool = False):
+    """Update config.py with a comment listing all available skills."""
+    commands_dir = Path.home() / '.claude' / 'commands'
+    config_path = Path.home() / '.claude' / 'hooks' / 'config.py'
+
+    if not commands_dir.exists():
+        if not quiet:
+            print(f"No commands directory found at {commands_dir}")
+        return
+
+    # Get all skill names from .md files
+    skills = []
+    for md_file in sorted(commands_dir.glob('*.md')):
+        skill_name = md_file.stem
+        # Read first line for description
+        try:
+            first_line = md_file.read_text().split('\n')[0].strip()
+            # Clean up markdown
+            first_line = first_line.lstrip('#').strip()
+            if len(first_line) > 60:
+                first_line = first_line[:57] + '...'
+            skills.append((skill_name, first_line))
+        except:
+            skills.append((skill_name, ''))
+
+    if not skills:
+        if not quiet:
+            print("No skills found in ~/.claude/commands/")
+        return
+
+    # Build the comment block
+    comment_lines = [
+        "# Available skills (from ~/.claude/commands/):",
+    ]
+    for name, desc in skills:
+        if desc:
+            comment_lines.append(f"#   {name}: {desc}")
+        else:
+            comment_lines.append(f"#   {name}")
+    comment_block = '\n'.join(comment_lines)
+
+    # Read config
+    if not config_path.exists():
+        if not quiet:
+            print(f"Config not found at {config_path}")
+        return
+
+    content = config_path.read_text()
+
+    # Find and update PRESERVED_SKILLS section
+    # Look for existing comment block + PRESERVED_SKILLS
+    pattern = r'(# Available skills \(from ~/\.claude/commands/\):.*?\n)?# Skills to preserve'
+    replacement = f'{comment_block}\n# Skills to preserve'
+
+    if '# Available skills (from ~/.claude/commands/):' in content:
+        # Update existing comment block
+        pattern = r'# Available skills \(from ~/\.claude/commands/\):.*?(?=\n# Skills to preserve)'
+        new_content = re.sub(pattern, comment_block + '\n', content, flags=re.DOTALL)
+    else:
+        # Insert new comment block before PRESERVED_SKILLS
+        new_content = content.replace(
+            '# Skills to preserve',
+            f'{comment_block}\n# Skills to preserve'
+        )
+
+    config_path.write_text(new_content)
+    if not quiet:
+        print(f"Updated {config_path} with {len(skills)} skills:")
+        for name, desc in skills:
+            print(f"  - {name}")
 
 
 def main():
@@ -601,11 +799,20 @@ def main():
         help="Override CLI path detection"
     )
     parser.add_argument(
+        "--update-skills-config", action="store_true",
+        help="Update config.py with list of available skills as comment"
+    )
+    parser.add_argument(
         "remainder", nargs="*",
         help="Command to run after patching (use with --auto)"
     )
 
     args = parser.parse_args()
+
+    # Handle --update-skills-config
+    if args.update_skills_config:
+        update_skills_config()
+        sys.exit(0)
 
     # --get-patched doesn't need cli_path validation upfront
     if args.get_patched:
@@ -633,9 +840,9 @@ def main():
 
     if args.check:
         content = cli_path.read_text()
-        trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
+        trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
 
-        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched:
+        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
             print(f"OK: Fully patched ({cli_path})")
             sys.exit(0)
 
@@ -687,9 +894,18 @@ def main():
             else:
                 status.append("hook_is_error: pattern not found")
 
+        if file_injection_patched:
+            status.append("file_injection: OK")
+        else:
+            injection_result = find_file_injection_pattern(content)
+            if injection_result:
+                status.append("file_injection: NEEDS PATCH")
+            else:
+                status.append("file_injection: pattern not found")
+
         print(f"Status: {'; '.join(status)}")
-        # Core patches are trigger, hook_reply, hook_is_error; display and pct_base are optional
-        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched
+        # Core patches: trigger, hook_reply, hook_is_error, file_injection; display and pct_base are optional
+        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched
         sys.exit(0 if fully_patched else 1)
 
     elif args.restore:
@@ -709,9 +925,9 @@ def main():
             # Continue to exec if remainder provided
         else:
             content = cli_path.read_text()
-            trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched = check_already_patched(content)
-            # Core patches are trigger, hook_reply, and hook_is_error
-            if trigger_patched and hook_reply_patched and hook_is_error_patched:
+            trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
+            # Core patches are trigger, hook_reply, hook_is_error, and file_injection
+            if trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
                 cache[file_hash] = "patched"
                 save_cache(cache)
                 if not args.auto:

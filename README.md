@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
-[![Claude Code](https://img.shields.io/badge/claude--code-2.0.75--2.1.x-purple.svg)](https://claude.ai/claude-code)
+[![Claude Code](https://img.shields.io/badge/claude--code-2.1.4-purple.svg)](https://claude.ai/claude-code)
 
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
 
@@ -30,9 +30,9 @@ This system intercepts tool calls to manage context proactively:
 
 ## Compatibility
 
-### Claude Code 2.1.x
+### Claude Code 2.1.4
 
-CCM is compatible with Claude Code 2.1.x. The `c` launch command automatically patches the CLI to fix several issues:
+CCM is tested with Claude Code 2.1.4. The `c` launch command automatically patches the CLI **in-place** to fix several issues:
 
 | Patch | Issue | Fix |
 |-------|-------|-----|
@@ -40,15 +40,24 @@ CCM is compatible with Claude Code 2.1.x. The `c` launch command automatically p
 | **Display** | `/context` buffer display ignores env var override | Now uses same threshold function as trigger |
 | **Pct Base** | Percentage calculated from available context (136k) not total (200k) | Now calculates from total context window |
 | **Hook Reply** | Hook block responses shown as "error" | Changed to "reply" for clarity |
+| **File Injection** | Full file diffs injected into context on external changes | Replaced with minimal notification |
 
-The patched CLI is stored in `~/.claude/patched/` to survive auto-updates. The `c` command automatically detects CLI updates and re-patches as needed.
+**Important:** Patches are applied in-place to the original CLI, not as a copy. Running a copied/patched CLI from a different location breaks skill loading due to Node.js module resolution issues.
 
 **Manual patch operations:**
 ```bash
-~/.claude/hooks/patch-autocompact.py --check       # Check patch status
-~/.claude/hooks/patch-autocompact.py --get-patched # Get/create patched CLI
-rm ~/.claude/patched/cli-ccm-*.js && c             # Force re-patch
+~/.claude/hooks/patch-autocompact.py --check   # Check patch status
+~/.claude/hooks/patch-autocompact.py --patch   # Apply patches in-place
+~/.claude/hooks/patch-autocompact.py --restore # Restore from backup
 ```
+
+### Skills
+
+CCM preserves all Claude Code skills (`/recap`, `/relay`, `/ccm`, etc.). Skills are loaded from:
+- `~/.claude/skills/` - User skills (symlinked to `~/.claude/commands/`)
+- `.claude/skills/` - Project-specific skills
+
+The `c` command ensures skills load correctly by using the original `claude` binary with patches applied in-place, rather than running a copied CLI file.
 
 ### Claude Code 2.0.75+
 
@@ -241,11 +250,13 @@ Compaction debug files:
 │   ├── patch-autocompact.py   # CLI patcher for 2.1.x
 │   ├── claude-session-purge.py # Session purge tool
 │   ├── config.py              # Configuration
+│   ├── c                      # Launch command
 │   └── lib/                   # Shared libraries
-├── patched/                   # Patched CLI copies (2.1.x)
-├── commands/
-│   ├── purge.md               # /purge slash command
-│   └── ccm.md                 # /ccm slash command
+├── commands/                  # Skill definitions
+│   ├── ccm.md                 # /ccm slash command
+│   ├── recap.md               # /recap slash command
+│   └── relay.md               # /relay slash command
+├── skills -> commands         # Symlink for Claude Code compatibility
 ├── setup.sh                   # Shell function setup
 ├── compact-instructions.txt   # Compaction instructions (customizable)
 ├── credentials.json           # API keys (you create this)
@@ -417,8 +428,9 @@ tail -f ~/.claude/proxy.log
 
 ### Re-patch CLI after update
 ```bash
-rm ~/.claude/patched/cli-ccm-*.js
-c  # Will auto-patch on next launch
+~/.claude/hooks/patch-autocompact.py --restore  # Restore original
+~/.claude/hooks/patch-autocompact.py --patch    # Re-apply patches
+# Or just run c - it auto-patches if needed
 ```
 
 ## Documentation

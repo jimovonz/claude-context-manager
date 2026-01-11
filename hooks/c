@@ -80,22 +80,29 @@ ensure_proxy() {
     fi
 }
 
-# Get patched CLI path
-get_patched_cli() {
+# Ensure CLI is patched in-place
+ensure_patched() {
     if [[ -f "$PATCHER_SCRIPT" ]]; then
-        "$PATCHER_SCRIPT" --get-patched 2>/dev/null
+        # --auto patches in-place if needed, silently
+        "$PATCHER_SCRIPT" --auto 2>/dev/null || true
     fi
 }
 
 # Main
 main() {
+    # Trap 'c d..' typo (meant to type 'cd ..')
+    if [[ "$1" =~ ^d\.+$ ]]; then
+        local target="${1#d}"  # Strip leading 'd', leaving '..' or '...'
+        echo "Caught typo: running 'cd $target' instead" >&2
+        cd "$target"
+        exec "$SHELL"
+    fi
+
     local session_id
     session_id=$(find_session_id "$@")
 
     ensure_proxy
-
-    local patched_cli
-    patched_cli=$(get_patched_cli || true)
+    ensure_patched
 
     local env_vars=(
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
@@ -107,11 +114,7 @@ main() {
     fi
 
     local cmd
-    if [[ -n "$patched_cli" && -f "$patched_cli" ]]; then
-        cmd=(env "${env_vars[@]}" node "$patched_cli")
-    else
-        cmd=(env "${env_vars[@]}" claude)
-    fi
+    cmd=(env "${env_vars[@]}" claude)
 
     if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
         cmd+=(--dangerously-skip-permissions)
