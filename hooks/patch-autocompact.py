@@ -23,6 +23,17 @@ Patches applied:
    rewrites, this can be huge (2x file size) and cause 413 errors.
    This patch replaces the diff with a short notification.
 
+5. THRESHOLD PATCH: Reduce warning/error buffer sizes
+   Original: uL0=13000 (autocompact), c97=20000 (warning), p97=20000 (error)
+   Patched:  uL0=10000 (5% of 200k), c97=2000 (1% before), p97=1000 (0.5% before)
+   This ensures warnings only appear close to the autocompact trigger (~94%)
+   instead of at ~83.5% with the default 20k buffers.
+
+6. BLOCKING LIMIT PATCH: Align blocking with autocompact threshold
+   Original: D=q3A()-mL0 (136k - 3k = 133k, ignores COMPACT_PCT setting)
+   Patched:  D=xs2() (uses autocompact threshold, e.g., 190k with 95%)
+   This prevents "Context limit reached" errors at ~67% when threshold is set higher.
+
 Usage:
     # Check if patch is needed
     ./patch-autocompact.py --check
@@ -74,6 +85,19 @@ HOOK_IS_ERROR_PATTERNS = []
 # File injection patch - replace diff injection with minimal notification
 # The pattern spans two lines due to template literal with embedded newline
 FILE_INJECTION_NOTIFICATION = 'Note: ${A.filename} was modified externally. Use Read tool if needed.'
+
+# Threshold values patch - reduce warning/error buffers so they don't trigger until close to autocompact
+# Original: uL0=13000 (autocompact buffer), c97=20000 (warning), p97=20000 (error), mL0=3000 (blocking)
+# Patched:  uL0=10000 (5% of 200k), c97=2000 (warning 1% before), p97=1000 (error 0.5% before)
+# Pattern matches: var VARNAME=13000,VARNAME=20000,VARNAME=20000,VARNAME=3000
+THRESHOLD_PATTERN_RE = r'var\s+([a-zA-Z_$][a-zA-Z0-9_$]*)=13000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=3000'
+THRESHOLD_PATCHED_RE = r'var\s+[a-zA-Z_$][a-zA-Z0-9_$]*=10000,[a-zA-Z_$][a-zA-Z0-9_$]*=2000,[a-zA-Z_$][a-zA-Z0-9_$]*=1000,[a-zA-Z_$][a-zA-Z0-9_$]*=3000'
+
+# Blocking limit patch - align blocking with autocompact threshold instead of available context
+# Original: D=q3A()-mL0 where q3A()=136k (available), mL0=3k → blocks at 133k (67% of 200k)
+# Patched:  D=xs2() where xs2()=autocompact threshold → blocks at same point as autocompact
+# Pattern: D=AVAILABLE_FUNC()-BLOCKING_CONST in ic() function
+BLOCKING_LIMIT_PATTERN_RE = r',([A-Z])=([a-zA-Z0-9_$]+)\(\)-([a-zA-Z0-9_$]+),([A-Z])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
 
 
 def find_cli_path() -> Path | None:
@@ -206,10 +230,10 @@ def find_autocompact_mathmin(content: str) -> tuple[int, int, str] | None:
     return None
 
 
-def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, bool]:
+def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, bool, bool, bool]:
     """Check if the file is already patched.
 
-    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched)
+    Returns: (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched)
     """
     trigger_patched = False
     display_patched = False
@@ -217,6 +241,8 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
     hook_reply_patched = False
     hook_is_error_patched = False
     file_injection_patched = False
+    threshold_patched = False
+    blocking_limit_patched = False
 
     # Check trigger patch: Math.max in autocompact function
     env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
@@ -283,7 +309,29 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
     # Check file injection patch: minimal notification instead of full diff
     file_injection_patched = check_file_injection_patched(content)
 
-    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched)
+    # Check threshold patch: reduced warning/error buffers
+    # Patched if new pattern exists and old pattern doesn't
+    threshold_patched = (
+        re.search(THRESHOLD_PATCHED_RE, content) is not None and
+        re.search(THRESHOLD_PATTERN_RE, content) is None
+    )
+
+    # Check blocking limit patch: D=xs2() instead of D=q3A()-mL0
+    # Patched if the original pattern (FUNC()-CONST) is replaced with just the threshold func call
+    threshold_func = find_threshold_function_name(content)
+    if threshold_func:
+        # Original pattern: D=q3A()-mL0,W=process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+        # Patched pattern: D=xs2(),W=process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE
+        blocking_match = re.search(BLOCKING_LIMIT_PATTERN_RE, content)
+        if blocking_match:
+            # Still has the subtraction pattern - not patched
+            blocking_limit_patched = False
+        else:
+            # Check if the patched pattern exists (D=THRESHOLD_FUNC(),W=...)
+            patched_blocking_pattern = rf',([A-Z])={re.escape(threshold_func)}\(\),([A-Z])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
+            blocking_limit_patched = bool(re.search(patched_blocking_pattern, content))
+
+    return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched)
 
 
 def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
@@ -475,6 +523,8 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     4. Hook reply (<error> → <reply>)
     5. Hook is_error (is_error:!0 → is_error:!1)
     6. File injection (full diff → minimal notification)
+    7. Threshold values (warning/error buffers reduced)
+    8. Blocking limit (D=q3A()-mL0 → D=xs2())
 
     Returns: (success, message)
     """
@@ -482,9 +532,9 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     messages = []
 
     # Check current patch status
-    trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
+    trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched = check_already_patched(content)
 
-    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
+    if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched and threshold_patched and blocking_limit_patched:
         return (True, "Already fully patched")
 
     # Create backup if it doesn't exist (only for in-place patching)
@@ -601,6 +651,46 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     else:
         messages.append("File injection already patched")
 
+    # Patch 7: Threshold values (reduced warning/error buffers)
+    if not threshold_patched:
+        threshold_match = re.search(THRESHOLD_PATTERN_RE, content)
+        if threshold_match:
+            # Extract variable names from the match to preserve them
+            var1, var2, var3, var4 = threshold_match.groups()
+            old_str = threshold_match.group(0)
+            new_str = f'var {var1}=10000,{var2}=2000,{var3}=1000,{var4}=3000'
+            if dry_run:
+                messages.append(f"Would patch thresholds: {old_str} → {new_str}")
+            else:
+                content = content[:threshold_match.start()] + new_str + content[threshold_match.end():]
+                messages.append("Patched thresholds: warning/error buffers reduced")
+        else:
+            messages.append("Threshold pattern not found (may be different CLI version)")
+    else:
+        messages.append("Thresholds already patched")
+
+    # Patch 8: Blocking limit (D=q3A()-mL0 → D=xs2())
+    if not blocking_limit_patched:
+        threshold_func = find_threshold_function_name(content)
+        if threshold_func:
+            blocking_match = re.search(BLOCKING_LIMIT_PATTERN_RE, content)
+            if blocking_match:
+                var_d, avail_func, blocking_const, var_w = blocking_match.groups()
+                old_str = blocking_match.group(0)
+                # Replace D=q3A()-mL0 with D=xs2() (uses autocompact threshold)
+                new_str = f',{var_d}={threshold_func}(),{var_w}=process.env.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
+                if dry_run:
+                    messages.append(f"Would patch blocking limit: {old_str} → {new_str}")
+                else:
+                    content = content[:blocking_match.start()] + new_str + content[blocking_match.end():]
+                    messages.append(f"Patched blocking limit: {avail_func}()-{blocking_const}→{threshold_func}()")
+            else:
+                messages.append("Blocking limit pattern not found (may be different CLI version)")
+        else:
+            messages.append("Could not find threshold function for blocking limit patch")
+    else:
+        messages.append("Blocking limit already patched")
+
     if dry_run:
         return (True, "; ".join(messages))
 
@@ -609,15 +699,15 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
 
     # Verify
     verify_content = cli_path.read_text()
-    trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok, file_injection_ok = check_already_patched(verify_content)
+    trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok, file_injection_ok, threshold_ok, blocking_ok = check_already_patched(verify_content)
 
-    # Core patches: trigger, hook_reply, hook_is_error are essential
+    # Core patches: trigger, hook_reply, hook_is_error, threshold, blocking_limit are essential
     # file_injection is only required if the pattern exists in the CLI
     # Display and pct_base are optional (may not match on all versions)
     file_injection_required = find_file_injection_pattern(content) is not None
     file_injection_check = file_injection_ok or not file_injection_required
 
-    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_check:
+    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_check and threshold_ok and blocking_ok:
         return (True, "; ".join(messages))
     else:
         # Restore backup if we created one
@@ -668,8 +758,8 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
             if cached_hash == source_hash:
                 content = patched_path.read_text()
                 if hash_marker in content[:500]:
-                    trigger_ok, display_ok, pct_ok, hook_ok, hook_err_ok, file_inj_ok = check_already_patched(content)
-                    if trigger_ok and hook_ok:  # Core patches OK
+                    trigger_ok, display_ok, pct_ok, hook_ok, hook_err_ok, file_inj_ok, threshold_ok, blocking_ok = check_already_patched(content)
+                    if trigger_ok and hook_ok and threshold_ok and blocking_ok:  # Core patches OK
                         return (patched_path, "Using cached patched CLI")
         except Exception:
             pass  # Rebuild mirror
@@ -871,13 +961,13 @@ def main():
 
     if args.check:
         content = cli_path.read_text()
-        trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
+        trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched = check_already_patched(content)
 
         # file_injection is only required if the pattern exists in the CLI
         file_injection_required = find_file_injection_pattern(content) is not None
         file_injection_ok = file_injection_patched or not file_injection_required
 
-        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok:
+        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok and threshold_patched and blocking_limit_patched:
             print(f"OK: Fully patched ({cli_path})")
             sys.exit(0)
 
@@ -938,10 +1028,26 @@ def main():
             else:
                 status.append("file_injection: pattern not found")
 
+        if threshold_patched:
+            status.append("threshold: OK")
+        else:
+            if re.search(THRESHOLD_PATTERN_RE, content):
+                status.append("threshold: NEEDS PATCH")
+            else:
+                status.append("threshold: pattern not found")
+
+        if blocking_limit_patched:
+            status.append("blocking_limit: OK")
+        else:
+            if re.search(BLOCKING_LIMIT_PATTERN_RE, content):
+                status.append("blocking_limit: NEEDS PATCH")
+            else:
+                status.append("blocking_limit: pattern not found")
+
         print(f"Status: {'; '.join(status)}")
-        # Core patches: trigger, hook_reply, hook_is_error; file_injection only if pattern exists
+        # Core patches: trigger, hook_reply, hook_is_error, threshold, blocking_limit; file_injection only if pattern exists
         # display and pct_base are optional
-        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok
+        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok and threshold_patched and blocking_limit_patched
         sys.exit(0 if fully_patched else 1)
 
     elif args.restore:
@@ -961,12 +1067,12 @@ def main():
             # Continue to exec if remainder provided
         else:
             content = cli_path.read_text()
-            trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
-            # Core patches are trigger, hook_reply, hook_is_error
+            trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched = check_already_patched(content)
+            # Core patches are trigger, hook_reply, hook_is_error, threshold, blocking_limit
             # file_injection only required if pattern exists in CLI
             file_injection_required = find_file_injection_pattern(content) is not None
             file_injection_ok = file_injection_patched or not file_injection_required
-            if trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok:
+            if trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok and threshold_patched and blocking_limit_patched:
                 cache[file_hash] = "patched"
                 save_cache(cache)
                 if not args.auto:
