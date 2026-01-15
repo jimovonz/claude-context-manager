@@ -236,10 +236,13 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
                 trigger_patched = True
                 break
 
-    # Check display patch: ET2() instead of EHA()-bH0
-    # Patched pattern: c=s?FUNC():void 0 (single function call, no subtraction)
-    patched_display = r',[a-z]=[a-z]\?[A-Za-z0-9_$]+\(\):void 0,'
-    if re.search(patched_display, content):
+    # Check display patch: xs2() instead of q3A()-uL0
+    # Patched pattern: n=AA?FUNC():void 0 (single function call, no subtraction)
+    # - lowercase var, uppercase bool, function call WITHOUT subtraction
+    patched_display = r'[a-z]=[A-Z]+\?[A-Za-z0-9_$]+\(\):void 0'
+    # Unpatched has subtraction: n=AA?q3A()-uL0:void 0
+    unpatched_display = r'[a-z]=[A-Z]+\?[A-Za-z0-9_$]+\(\)-[A-Za-z0-9_$]+:void 0'
+    if re.search(patched_display, content) and not re.search(unpatched_display, content):
         display_patched = True
 
     # Check percentage base patch: CONTEXT(MODEL(),OTHER())*(G/100) instead of A*(G/100)
@@ -287,14 +290,21 @@ def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
     """
     Find the display threshold calculation pattern.
 
-    Looking for: c=s?EHA()-bH0:void 0
-    (where EHA and bH0 are minified names that vary)
+    Looking for: n=AA?q3A()-uL0:void 0
+    (where variable names are minified and vary between versions)
+
+    The pattern is: VAR=BOOL?FUNC()-CONST:void 0
+    where VAR is lowercase, BOOL is uppercase, FUNC is available context func,
+    CONST is hardcoded buffer constant.
 
     Returns: (start_offset, end_offset, matched_string, threshold_func) or None
     """
-    # Pattern: ,c=s?FUNC()-CONST:void 0,
-    # where FUNC is some function and CONST is hardcoded buffer constant
-    pattern = r',([a-z])=([a-z])\?([A-Za-z0-9_$]+)\(\)-[A-Za-z0-9_$]+:void 0,'
+    # Pattern: n=AA?q3A()-uL0:void 0
+    # - lowercase var (n)
+    # - uppercase bool var (AA)
+    # - function call minus constant
+    # - void 0 fallback
+    pattern = r'([a-z])=([A-Z]+)\?([A-Za-z0-9_$]+)\(\)-([A-Za-z0-9_$]+):void 0'
 
     match = re.search(pattern, content)
     if match:
@@ -500,17 +510,17 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     else:
         messages.append("Trigger already patched")
 
-    # Patch 2: Display calculation (EHA()-bH0 → ET2())
+    # Patch 2: Display calculation (q3A()-uL0 → xs2())
     if not display_patched:
         display_result = find_display_pattern(content)
         if display_result:
             start, end, matched, threshold_func = display_result
-            # Replace: ,c=s?EHA()-bH0:void 0, → ,c=s?ET2():void 0,
-            # Re-match to get captured groups, fall back to generic names
+            # Replace: n=AA?q3A()-uL0:void 0 → n=AA?xs2():void 0
+            # Extract variable names from the matched pattern
             import re as re2
-            m = re2.search(r',([a-z])=([a-z])\?', matched)
-            var1, var2 = (m.group(1), m.group(2)) if m else ('e', 't')
-            replacement = f',{var1}={var2}?{threshold_func}():void 0,'
+            m = re2.search(r'([a-z])=([A-Z]+)\?', matched)
+            var1, var2 = (m.group(1), m.group(2)) if m else ('n', 'AA')
+            replacement = f'{var1}={var2}?{threshold_func}():void 0'
 
             if dry_run:
                 messages.append(f"Would patch display: {matched[:30]}... → {replacement}")
@@ -601,9 +611,13 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     verify_content = cli_path.read_text()
     trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok, file_injection_ok = check_already_patched(verify_content)
 
-    # Core patches: trigger, hook_reply, hook_is_error, file_injection are essential
+    # Core patches: trigger, hook_reply, hook_is_error are essential
+    # file_injection is only required if the pattern exists in the CLI
     # Display and pct_base are optional (may not match on all versions)
-    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_ok:
+    file_injection_required = find_file_injection_pattern(content) is not None
+    file_injection_check = file_injection_ok or not file_injection_required
+
+    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_check:
         return (True, "; ".join(messages))
     else:
         # Restore backup if we created one
@@ -618,10 +632,11 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     """
     Get path to a patched CLI copy.
 
-    Creates a patched copy in ~/.claude/patched/ to survive auto-updates.
-    The patched copy is named cli-ccm-{hash}.js where hash identifies the source version.
+    Creates a mirrored directory structure in ~/.claude/patched/claude-code/ where:
+    - All files/dirs except cli.js are symlinked to the original
+    - cli.js is copied and patched
 
-    __dirname in the CLI is hardcoded at build time, so location doesn't matter.
+    This survives auto-updates since we run from a separate location.
 
     Returns: (patched_path, message) or (None, error_message)
     """
@@ -634,32 +649,47 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
     if not cli_path.exists():
         return (None, f"CLI not found at {cli_path}")
 
+    # Source directory (e.g., .../node_modules/@anthropic-ai/claude-code/)
+    source_dir = cli_path.parent
+
     # Compute source hash to detect CLI updates
     source_hash = get_file_hash(cli_path)
     hash_marker = f"// CCM-PATCHED: {source_hash}"
 
-    # Patched copy lives in ~/.claude/patched/ to survive auto-updates
-    PATCHED_DIR.mkdir(parents=True, exist_ok=True)
-    patched_path = PATCHED_DIR / f"cli-ccm-{source_hash}.js"
+    # Mirror directory in ~/.claude/patched/claude-code/
+    mirror_dir = PATCHED_DIR / "claude-code"
+    patched_path = mirror_dir / "cli.js"
+    hash_file = mirror_dir / ".ccm-hash"
 
-    if patched_path.exists():
-        content = patched_path.read_text()
-        # Check if it's our patched version and matches current source
-        if hash_marker in content[:500]:  # Check near start of file
-            trigger_ok, display_ok, pct_ok, hook_ok, hook_err_ok, file_inj_ok = check_already_patched(content)
-            if trigger_ok and hook_ok and file_inj_ok:  # display and pct are optional
-                return (patched_path, "Using cached patched CLI")
-        # Invalid patch, remove it
-        patched_path.unlink()
+    # Check if existing mirror is valid and up-to-date
+    if mirror_dir.exists() and patched_path.exists() and hash_file.exists():
+        try:
+            cached_hash = hash_file.read_text().strip()
+            if cached_hash == source_hash:
+                content = patched_path.read_text()
+                if hash_marker in content[:500]:
+                    trigger_ok, display_ok, pct_ok, hook_ok, hook_err_ok, file_inj_ok = check_already_patched(content)
+                    if trigger_ok and hook_ok:  # Core patches OK
+                        return (patched_path, "Using cached patched CLI")
+        except Exception:
+            pass  # Rebuild mirror
 
-    # Clean up old patched versions (different hash)
-    for old_file in PATCHED_DIR.glob("cli-ccm-*.js"):
-        if old_file != patched_path:
-            old_file.unlink()
+    # Clean up old mirror
+    if mirror_dir.exists():
+        shutil.rmtree(mirror_dir)
 
-    # Copy source to patched location with hash marker after shebang
+    # Create mirror directory
+    mirror_dir.mkdir(parents=True, exist_ok=True)
+
+    # Symlink all files/dirs except cli.js
+    for item in source_dir.iterdir():
+        if item.name == "cli.js":
+            continue  # Will copy and patch this one
+        link_path = mirror_dir / item.name
+        link_path.symlink_to(item)
+
+    # Copy cli.js with hash marker
     content = cli_path.read_text()
-    # Insert hash marker after the shebang line
     if content.startswith('#!'):
         newline_idx = content.index('\n')
         content = content[:newline_idx + 1] + hash_marker + '\n' + content[newline_idx + 1:]
@@ -667,20 +697,21 @@ def get_patched_cli(cli_path: Path | None = None) -> tuple[Path | None, str]:
         content = hash_marker + '\n' + content
     patched_path.write_text(content)
 
-    # Apply patches (no backup needed - we have the original)
+    # Apply patches
     success, msg = apply_patch(patched_path, dry_run=False, create_backup=False)
 
     if success:
-        # Also update skills config when creating new patched CLI
+        # Write hash file for cache validation
+        hash_file.write_text(source_hash)
+        # Update skills config
         try:
             update_skills_config(quiet=True)
         except Exception:
-            pass  # Non-critical, don't fail the patch
+            pass
         return (patched_path, f"Created patched CLI: {msg}")
     else:
         # Clean up failed patch
-        if patched_path.exists():
-            patched_path.unlink()
+        shutil.rmtree(mirror_dir)
         return (None, f"Patch failed: {msg}")
 
 
@@ -842,7 +873,11 @@ def main():
         content = cli_path.read_text()
         trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
 
-        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
+        # file_injection is only required if the pattern exists in the CLI
+        file_injection_required = find_file_injection_pattern(content) is not None
+        file_injection_ok = file_injection_patched or not file_injection_required
+
+        if trigger_patched and display_patched and pct_base_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok:
             print(f"OK: Fully patched ({cli_path})")
             sys.exit(0)
 
@@ -904,8 +939,9 @@ def main():
                 status.append("file_injection: pattern not found")
 
         print(f"Status: {'; '.join(status)}")
-        # Core patches: trigger, hook_reply, hook_is_error, file_injection; display and pct_base are optional
-        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched
+        # Core patches: trigger, hook_reply, hook_is_error; file_injection only if pattern exists
+        # display and pct_base are optional
+        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok
         sys.exit(0 if fully_patched else 1)
 
     elif args.restore:
@@ -926,8 +962,11 @@ def main():
         else:
             content = cli_path.read_text()
             trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched = check_already_patched(content)
-            # Core patches are trigger, hook_reply, hook_is_error, and file_injection
-            if trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_patched:
+            # Core patches are trigger, hook_reply, hook_is_error
+            # file_injection only required if pattern exists in CLI
+            file_injection_required = find_file_injection_pattern(content) is not None
+            file_injection_ok = file_injection_patched or not file_injection_required
+            if trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok:
                 cache[file_hash] = "patched"
                 save_cache(cache)
                 if not args.auto:

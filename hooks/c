@@ -79,12 +79,33 @@ ensure_proxy() {
     fi
 }
 
-# Ensure CLI is patched in-place
-ensure_patched() {
-    if [[ -f "$PATCHER_SCRIPT" ]]; then
-        # --auto patches in-place if needed, silently
-        "$PATCHER_SCRIPT" --auto 2>/dev/null || true
+# Get patched CLI (symlinked mirror that survives auto-updates)
+get_patched_cli() {
+    if [[ ! -f "$PATCHER_SCRIPT" ]]; then
+        echo "[CCM] Patcher not found" >&2
+        echo ""
+        return 1
     fi
+
+    # Get or create patched mirror
+    local result
+    result=$("$PATCHER_SCRIPT" --get-patched 2>&1)
+    local exit_code=$?
+
+    if [[ $exit_code -eq 0 ]]; then
+        # First line is the path, rest is status message
+        local patched_path
+        patched_path=$(echo "$result" | head -1)
+        if [[ -f "$patched_path" ]]; then
+            echo "[CCM] Patches: OK" >&2
+            echo "$patched_path"
+            return 0
+        fi
+    fi
+
+    echo "[CCM] Patches: failed - $result" >&2
+    echo ""
+    return 1
 }
 
 # Main
@@ -101,8 +122,10 @@ main() {
     session_id=$(find_session_id "$@")
 
     ensure_proxy
-    ensure_patched
-    echo "[CCM] Using patched CLI" >&2
+
+    # Get patched CLI (creates persistent copy that survives auto-updates)
+    local patched_cli
+    patched_cli=$(get_patched_cli)
 
     local env_vars=(
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
@@ -114,7 +137,13 @@ main() {
     fi
 
     local cmd
-    cmd=(env "${env_vars[@]}" claude)
+    if [[ -n "$patched_cli" && -f "$patched_cli" ]]; then
+        # Use patched copy (survives auto-updates)
+        cmd=(env "${env_vars[@]}" node "$patched_cli")
+    else
+        # Fallback to system claude
+        cmd=(env "${env_vars[@]}" claude)
+    fi
 
     if [[ "$SKIP_PERMISSIONS" == "true" ]]; then
         cmd+=(--dangerously-skip-permissions)

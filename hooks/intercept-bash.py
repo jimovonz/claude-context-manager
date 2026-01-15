@@ -32,6 +32,7 @@ def is_ccm_script(cmd: str) -> bool:
         r'intercept-.*\.py',
         r'learn-large-commands\.py',
         r'pre-compact\.py',
+        r'ccm-get\.py',
         r'~/.claude/hooks/',
         r'\.claude/hooks/',
     ]
