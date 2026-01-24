@@ -17,8 +17,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
-    log_metric, run_command, probe_command, get_command_classification,
-    is_cached_interactive, learn_command_classification,
+    build_retrieval_guidance, log_metric, run_command, probe_command,
+    get_command_classification, is_cached_interactive, learn_command_classification,
     BASH_THRESHOLD, CACHE_DIR
 )
 
@@ -131,7 +131,7 @@ def main():
         if re.match(r'^(ls|rm|find|wc|stat|du|df|/bin/ls|/usr/bin/find|/bin/rm)(\s|$)', cmd):
             json_pass()
             return
-        json_block("Cache file - use Task agent to read.")
+        json_block("Cache file - use Task agent to read.", exit_code=0)
         return
 
     # Trivial commands: let Claude handle natively
@@ -175,7 +175,7 @@ def main():
     if size <= BASH_THRESHOLD:
         log_metric("Bash", "inline", size)
         reason = f"Exit {exit_code}:\n\n{output}"
-        json_block(reason)
+        json_block(reason, exit_code=exit_code)
     else:
         lines = output.count('\n')
         cache_key = cache_output_ccm(
@@ -187,7 +187,13 @@ def main():
         )
         log_metric("Bash", "cached", size)
         reason = build_ccm_cache_response(cache_key, lines, size, exit_code, cmd)
-        json_block(reason)
+
+        # Add size-proportional retrieval guidance
+        guidance = build_retrieval_guidance(size, lines)
+        if guidance:
+            reason = reason + guidance
+
+        json_block(reason, exit_code=exit_code)
 
 
 if __name__ == '__main__':

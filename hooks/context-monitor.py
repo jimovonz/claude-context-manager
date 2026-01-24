@@ -23,7 +23,8 @@ CONTEXT_MONITOR_ENABLED = True
 CONTEXT_MAX_TOKENS = 200000
 CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 CONTEXT_CHARS_PER_TOKEN = 2.5  # Fallback when tiktoken unavailable (empirically ~2.4)
-CONTEXT_OVERHEAD_TOKENS = 45000  # Visible (~20k) + hidden Claude overhead (~25k)
+CONTEXT_OVERHEAD_TOKENS = 45000  # Without proxy: system (~20k) + tools (~15k) + hidden (~10k)
+CONTEXT_OVERHEAD_TOKENS_PROXIED = 10000  # With proxy: abbreviated system (~3k) + tools (~5k) + hidden (~2k)
 CONTEXT_MESSAGE_MULTIPLIER = 1.5  # Claude counts more than extracted text (structure, metadata)
 
 # Load from config
@@ -39,6 +40,10 @@ if CONFIG_FILE.exists():
                 globals()[key] = _config[key]
     except Exception:
         pass
+
+# If proxy is active (ANTHROPIC_BASE_URL set), system prompt and tools are abbreviated
+if os.environ.get('ANTHROPIC_BASE_URL'):
+    CONTEXT_OVERHEAD_TOKENS = CONTEXT_OVERHEAD_TOKENS_PROXIED
 
 # Try to load tiktoken for accurate counting
 _tokenizer = None

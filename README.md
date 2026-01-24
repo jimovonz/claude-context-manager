@@ -30,9 +30,9 @@ This system intercepts tool calls to manage context proactively:
 
 ## Compatibility
 
-### Claude Code 2.1.4
+### Claude Code 2.1.9+
 
-CCM is tested with Claude Code 2.1.4. The `c` launch command automatically patches the CLI **in-place** to fix several issues:
+CCM is tested with Claude Code 2.1.9 through 2.1.14. The `c` launch command automatically creates a patched CLI mirror to fix several issues:
 
 | Patch | Issue | Fix |
 |-------|-------|-----|
@@ -41,13 +41,22 @@ CCM is tested with Claude Code 2.1.4. The `c` launch command automatically patch
 | **Pct Base** | Percentage calculated from available context (136k) not total (200k) | Now calculates from total context window |
 | **Hook Reply** | Hook block responses shown as "error" | Changed to "reply" for clarity |
 | **File Injection** | Full file diffs injected into context on external changes | Replaced with minimal notification |
+| **Threshold** | Warning/error buffers too large (20k) | Reduced to trigger near autocompact (~94%) |
+| **Blocking Limit** | Context blocking at 67% with high thresholds | Aligned with autocompact threshold |
 
-**Important:** Patches are applied in-place to the original CLI, not as a copy. Running a copied/patched CLI from a different location breaks skill loading due to Node.js module resolution issues.
+**Note:** Hook block responses also use a `"None - "` prefix at the hook level (e.g., `Error: None - Exit 0:`) to signal successful operations regardless of CLI version. This is independent of the patches above.
+
+**New in 2.1.9+:**
+- **additionalContexts** - Hook responses can now include model-only guidance that doesn't clutter user output
+- **${CLAUDE_SESSION_ID}** - Skills can access the current session ID via template substitution
+- **Setup hook** - CCM can run initialization tasks on session start (proxy check, cache cleanup, patch validation)
+
+**Patching approach:** The patcher creates a mirror at `~/.claude/patched/claude-code/` — symlinks for all files except `cli.js` which is copied and patched. This survives CLI auto-updates (re-patches automatically when the source hash changes) while preserving Node.js module resolution for skills.
 
 **Manual patch operations:**
 ```bash
 ~/.claude/hooks/patch-autocompact.py --check   # Check patch status
-~/.claude/hooks/patch-autocompact.py --patch   # Apply patches in-place
+~/.claude/hooks/patch-autocompact.py --patch   # Apply patches to mirror
 ~/.claude/hooks/patch-autocompact.py --restore # Restore from backup
 ```
 
@@ -57,7 +66,7 @@ CCM preserves all Claude Code skills (`/recap`, `/relay`, `/ccm`, etc.). Skills 
 - `~/.claude/skills/` - User skills (symlinked to `~/.claude/commands/`)
 - `.claude/skills/` - Project-specific skills
 
-The `c` command ensures skills load correctly by using the original `claude` binary with patches applied in-place, rather than running a copied CLI file.
+The `c` command ensures skills load correctly by using a patched mirror that preserves the original directory structure, maintaining Node.js module resolution for skill loading.
 
 ### Claude Code 2.0.75+
 
@@ -115,12 +124,13 @@ No terminal pollution - env vars are only set for the claude process.
 
 ### Configuration
 
-Override defaults with env vars:
+Settings are read from `~/.claude/hooks/config.py`. Override per-session with env vars:
 
 ```bash
-COMPACT_PCT=90 c                    # Different threshold
+COMPACT_PCT=90 c                    # Different threshold (overrides AUTOCOMPACT_THRESHOLD)
 SKIP_PERMISSIONS=false c            # Prompt for permissions
 THINKING_PROXY_PORT=9000 c          # Different port
+THINKING_PROXY_ENABLED=False c      # Disable proxy (direct API access)
 ```
 
 ## External Compaction (Optional)
@@ -249,6 +259,7 @@ Compaction debug files:
 │   ├── thinking-proxy.py      # Thinking block proxy
 │   ├── patch-autocompact.py   # CLI patcher for 2.1.x
 │   ├── claude-session-purge.py # Session purge tool
+│   ├── ccm-setup.py           # Setup hook (2.1.9+)
 │   ├── config.py              # Configuration
 │   ├── c                      # Launch command
 │   └── lib/                   # Shared libraries
@@ -294,7 +305,7 @@ When hooks intercept a tool call, Claude Code displays it as an "error" or "bloc
 2. Returned the results (inline or cached)
 3. Prevented double-execution by "blocking" the original call
 
-Treat these messages as successful results unless they explicitly indicate a failure.
+Successful operations display as `Error: None - Exit 0:` followed by the output. The `None - ` prefix signals to the model that despite the `Error:` label (which the CLI always adds), the operation succeeded. Only responses without the `None - ` prefix are genuine errors.
 
 ### Automatic Interception
 
@@ -368,7 +379,7 @@ READ_THRESHOLD = 25000
 
 # Auto-compaction
 AUTOCOMPACT_ENABLED = True
-AUTOCOMPACT_THRESHOLD = 80   # percent of context
+AUTOCOMPACT_THRESHOLD = 95   # percent of context
 
 # Pre-compact hook
 PRE_COMPACT_ENABLED = True
@@ -435,6 +446,7 @@ tail -f ~/.claude/proxy.log
 
 ## Documentation
 
+- **Architecture (all components):** `docs/ARCHITECTURE.md`
 - Context management: `hooks/CONTEXT_MANAGEMENT.md`
 - CLI patching & skills: `docs/CLI_PATCHING.md`
 - External compaction: `docs/EXTERNAL_COMPACTION.md`

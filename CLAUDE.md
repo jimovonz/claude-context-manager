@@ -8,20 +8,21 @@ This environment has hooks that manage context to prevent premature compaction.
 When a hook "blocks" a tool call, the response contains **successful results**, not errors:
 - The command was executed
 - Output is in the message (or cached if large)
-- Treat as normal output unless explicitly marked as an error
+- Successful responses are prefixed with `"None - "` (e.g., `"None - Exit 0:"`)
+- Only responses WITHOUT the `"None - "` prefix are genuine errors
 
 ## Working With Cached Output
 
-Large outputs are cached to `~/.claude/cache/`. When you see:
-```
-Cached (1523 lines, 45678 bytes, exit 0).
-File: ~/.claude/cache/a1b2c3d4
-```
+When output is cached, you receive a stub with a **category** that tells you what to do:
 
-Your options:
-1. **Task agent** - Spawn agent to summarize or extract from cached file
-2. **Paginate** - Use offset/limit on original Read call
-3. **Subagent for full content** - Subagent calls bypass interception
+| Category | Size | Action |
+|----------|------|--------|
+| **SMALL** | 8-25KB | Retrieve directly via `ccm-get.py` |
+| **MEDIUM** | 25-50KB | Retrieve directly, OR extract specific info |
+| **LARGE** | 50-100KB | Prefer extraction. Direct only if editing |
+| **MASSIVE** | >100KB | MUST extract/summarize |
+
+**The category is authoritative.** Follow it.
 
 ## Working With CCM Stubs
 
@@ -41,14 +42,29 @@ The `source:` line tells you what this content is:
 - **Bash**: Shows the command (truncated if long)
 - **Grep/Glob**: Shows the search pattern
 
-**When to retrieve:** If the stub's source is relevant to your current task, retrieve it using:
+**When to retrieve:** Choose based on what you need:
+
+**Full content needed** (editing, user asked for it) → read directly:
 ```bash
-~/.claude/hooks/ccm-get.py sha256:abc123...     # Full content
-~/.claude/hooks/ccm-get.py sha256:abc123 --info # Metadata only
-~/.claude/hooks/ccm-get.py --last               # Most recent cached item
+~/.claude/hooks/ccm-get.py sha256:abc123...
+```
+No subagent overhead. If you need full content, this is correct.
+
+**Specific info from large content** → subagent extracts/summarizes:
+```
+Task(
+  prompt="Run ~/.claude/hooks/ccm-get.py <key> and <extract specific info>",
+  subagent_type="general-purpose"
+)
 ```
 
-Or use a Task agent to read and summarize the content.
+**Key insight:** Subagents only help when they REDUCE what enters main context. A subagent that retrieves and returns full content is pure overhead (8k+ tokens, 30+ seconds wasted).
+
+**When using subagents for extraction:**
+- Give specific extraction task, not "get content"
+- Summarize findings ("60 users including root, system services")
+- Extract only relevant portions
+- Report conclusions, not raw data
 
 ## Subagent Behavior
 

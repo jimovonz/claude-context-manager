@@ -20,9 +20,9 @@ CONFIG_FILE = HOOKS_DIR / 'config.py'
 # Defaults (can be overridden in config.py)
 CACHE_DIR = Path.home() / '.claude' / 'cache'
 CACHE_MAX_AGE_MINUTES = 60
-BASH_THRESHOLD = 2000
-GLOB_THRESHOLD = 2000
-GREP_THRESHOLD = 2000
+BASH_THRESHOLD = 8000
+GLOB_THRESHOLD = 8000
+GREP_THRESHOLD = 8000
 READ_THRESHOLD = 25000
 PATTERNS_EXPIRY_DAYS = 30
 METRICS_ENABLED = False
@@ -72,7 +72,16 @@ def is_subagent(transcript_path: str, tool_use_id: str) -> bool:
     transcript_dir = Path(transcript_path).parent
 
     # Quick check: any agent files exist?
+    # Agent files can be in transcript_dir (old structure) or subagents/ subdirectory (new structure)
     agent_files = list(transcript_dir.glob('agent-*.jsonl'))
+
+    # Also check subagents/ subdirectory (Claude Code 2.1.x structure)
+    # The session directory is named after the session ID (without .jsonl)
+    session_dir = transcript_dir / Path(transcript_path).stem
+    subagents_dir = session_dir / 'subagents'
+    if subagents_dir.exists():
+        agent_files.extend(subagents_dir.glob('agent-*.jsonl'))
+
     if not agent_files:
         return False
 
@@ -173,12 +182,11 @@ def build_ccm_cache_response(
             pin_level = meta.get('pinned', {}).get('level', 'none') if meta else 'none'
 
             stub = build_ccm_stub(key, size, lines, exit_code, pin_level)
+            # Just stub + original + key for retrieval
+            # Category-based guidance is added by the intercept hooks
             return f"""{stub}
 Original: {original}
-
-Options: Task agent (summarize or full content), or paginate with offset/limit.
-
-YOU MUST SPAWN A SUBAGENT TO RETRIEVE THIS CONTENT USING: ~/.claude/hooks/ccm-get.py {key}"""
+Retrieve: ~/.claude/hooks/ccm-get.py {key}"""
         except ImportError:
             pass
 
@@ -186,8 +194,58 @@ YOU MUST SPAWN A SUBAGENT TO RETRIEVE THIS CONTENT USING: ~/.claude/hooks/ccm-ge
     return build_cache_response(key, lines, size, exit_code, original)
 
 
-def json_block(reason: str) -> None:
+def get_size_category(size: int) -> tuple[str, str, str]:
+    """Get size category, guidance, and recommended action.
+
+    Returns (category, guidance, action_prompt) tuple.
+    Categories defined in CLAUDE.md for consistent model behavior.
+    """
+    tokens_k = size / 4000
+    context_pct = tokens_k / 200 * 100
+
+    if size < 25000:
+        # SMALL: 8-25KB (~2-6k tokens)
+        return (
+            "SMALL",
+            f"Retrieve directly ({tokens_k:.0f}k tokens)",
+            "OPTIONS: 1. Retrieve directly via ccm-get.py (recommended for SMALL) 2. Subagent to extract specific info"
+        )
+
+    elif size < 50000:
+        # MEDIUM: 25-50KB (~6-12k tokens)
+        return (
+            "MEDIUM",
+            f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context)",
+            "OPTIONS: 1. Retrieve directly if ALL content needed 2. Subagent to extract/summarize if only partial info needed"
+        )
+
+    elif size < 100000:
+        # LARGE: 50-100KB (~12-25k tokens)
+        return (
+            "LARGE",
+            f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context)",
+            "OPTIONS: 1. Retrieve directly ONLY if editing entire file 2. Subagent to extract/summarize (recommended for LARGE)"
+        )
+
+    else:
+        # MASSIVE: >100KB (~25k+ tokens)
+        return (
+            "MASSIVE",
+            f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context) - will trigger compaction",
+            "OPTIONS: 1. DO NOT retrieve fully - will destroy context 2. MUST use subagent to extract/summarize specific info"
+        )
+
+
+def build_retrieval_guidance(size: int, lines: int) -> str:
+    """Build size-proportional retrieval guidance with category and options."""
+    category, guidance, options = get_size_category(size)
+    return f"\ncategory: {category}\nguidance: {guidance}\n{options}"
+
+
+def json_block(reason: str, exit_code: int = None) -> None:
     """Output JSON to block tool execution with reason."""
+    if exit_code is not None and exit_code == 0:
+        reason = f"None - {reason}"
     print(json.dumps({"decision": "block", "reason": reason}))
 
 

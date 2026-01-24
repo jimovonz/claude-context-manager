@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
-    log_metric, READ_THRESHOLD
+    build_retrieval_guidance, log_metric, READ_THRESHOLD
 )
 
 # File patterns that should never be intercepted (full content required)
@@ -55,22 +55,22 @@ def main():
     # Block main agent from reading cache files
     file_path_str = str(file_path)
     if '/tmp/claude-tool-cache/' in file_path_str:
-        json_block("Cache file - use Task agent or ccm-get.py to retrieve.")
+        json_block("Cache file - use Task agent or ccm-get.py to retrieve.", exit_code=0)
         return
     if '/.claude/cache/' in file_path_str:
         # Check if this is a CCM blob path (contains sha256 hash)
         ccm_match = re.search(r'ccm/blobs/([a-f0-9]{2})/([a-f0-9]{62})', file_path_str)
         if ccm_match:
             key = f"sha256:{ccm_match.group(1)}{ccm_match.group(2)}"
-            json_block(f"CCM cached content. Retrieve with: ~/.claude/hooks/ccm-get.py {key}")
+            json_block(f"CCM cached content. Retrieve with: ~/.claude/hooks/ccm-get.py {key}", exit_code=0)
             return
         # Legacy cache file (8-char hex)
         legacy_match = re.search(r'/cache/([a-f0-9]{8})$', file_path_str)
         if legacy_match:
-            json_block(f"Cached content. Retrieve with: ~/.claude/hooks/ccm-get.py ~/.claude/cache/{legacy_match.group(1)}")
+            json_block(f"Cached content. Retrieve with: ~/.claude/hooks/ccm-get.py ~/.claude/cache/{legacy_match.group(1)}", exit_code=0)
             return
         # Generic cache path
-        json_block("Cache file - use Task agent or ~/.claude/hooks/ccm-get.py to retrieve.")
+        json_block("Cache file - use Task agent or ~/.claude/hooks/ccm-get.py to retrieve.", exit_code=0)
         return
 
     # Extract remaining Read parameters
@@ -121,7 +121,13 @@ def main():
     log_metric("Read", "cached", file_size)
 
     reason = build_ccm_cache_response(cache_key, lines, file_size, 0, str(file_path))
-    json_block(reason)
+
+    # Add size-proportional retrieval guidance
+    guidance = build_retrieval_guidance(file_size, lines)
+    if guidance:
+        reason = reason + guidance
+
+    json_block(reason, exit_code=0)
 
 
 if __name__ == '__main__':

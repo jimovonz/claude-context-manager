@@ -15,7 +15,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
-    log_metric, GLOB_THRESHOLD, CACHE_DIR
+    build_retrieval_guidance, log_metric, GLOB_THRESHOLD, CACHE_DIR
 )
 
 
@@ -79,12 +79,15 @@ def main():
 
     # Block main agent from globbing cache directories
     if '/.claude/cache/' in check_path or '/tmp/claude-tool-cache/' in check_path:
-        json_block("Cache directory - use Task agent to access.")
+        json_block("Cache directory - use Task agent to access.", exit_code=0)
         return
 
     # Execute
     output, exit_code = run_glob(pattern, path_arg)
     size = len(output)
+
+    # For glob/find, exit 1 = no matches (normal condition), exit 2+ = actual error
+    effective_exit = 0 if exit_code <= 1 else exit_code
 
     # Return result (always block)
     if size <= GLOB_THRESHOLD:
@@ -93,7 +96,7 @@ def main():
             reason = output if output else "No matches."
         else:
             reason = "No matches."
-        json_block(reason)
+        json_block(reason, exit_code=effective_exit)
     else:
         lines = output.count('\n')
         cache_key = cache_output_ccm(
@@ -104,7 +107,13 @@ def main():
         )
         log_metric("Glob", "cached", size)
         reason = build_ccm_cache_response(cache_key, lines, size, exit_code, f"pattern='{pattern}' path='{path_arg}'")
-        json_block(reason)
+
+        # Add size-proportional retrieval guidance
+        guidance = build_retrieval_guidance(size, lines)
+        if guidance:
+            reason = reason + guidance
+
+        json_block(reason, exit_code=effective_exit)
 
 
 if __name__ == '__main__':

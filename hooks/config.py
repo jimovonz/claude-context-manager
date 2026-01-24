@@ -13,9 +13,10 @@ CACHE_DIR = Path.home() / '.claude' / 'cache'
 CACHE_MAX_AGE_MINUTES = 60
 
 # Output size thresholds (bytes) - outputs larger than this get cached
-BASH_THRESHOLD = 2000
-GLOB_THRESHOLD = 2000
-GREP_THRESHOLD = 2000
+# Small outputs (<8KB) pass through directly - caching overhead exceeds benefit
+BASH_THRESHOLD = 8000   # ~2k tokens
+GLOB_THRESHOLD = 8000   # ~2k tokens
+GREP_THRESHOLD = 8000   # ~2k tokens
 READ_THRESHOLD = 25000  # ~6k tokens
 
 # Learned patterns settings
@@ -40,6 +41,7 @@ CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 # Estimation parameters
 CONTEXT_CHARS_PER_TOKEN = 2.5  # Fallback when tiktoken not installed (empirically ~2.4)
 CONTEXT_OVERHEAD_TOKENS = 45000  # Visible (~20k) + hidden Claude overhead (~25k)
+CONTEXT_OVERHEAD_TOKENS_PROXIED = 10000  # When thinking proxy abbreviates system prompt/tools
 CONTEXT_MESSAGE_MULTIPLIER = 1.5  # Claude counts more than extracted text (structure, metadata)
 
 # Accuracy notes:
@@ -57,7 +59,12 @@ CONTEXT_MESSAGE_MULTIPLIER = 1.5  # Claude counts more than extracted text (stru
 AUTOCOMPACT_ENABLED = True
 
 # Default threshold (percent): triggers compaction at this % of max context
-AUTOCOMPACT_THRESHOLD = 80
+AUTOCOMPACT_THRESHOLD = 95
+
+# Max thinking tokens per turn. Controls API max_tokens budget.
+# Lower = more input headroom. With 10k, API input limit = 200k - 10k = 190k,
+# aligning with the 95% autocompact threshold and blocking limit patch.
+MAX_THINKING_TOKENS = 10000
 
 # =============================================================================
 # Pre-Compact Hook Settings
@@ -66,16 +73,8 @@ AUTOCOMPACT_THRESHOLD = 80
 # Enable/disable PreCompact hook
 PRE_COMPACT_ENABLED = True
 
-# Two-pass distillation prompts
-# Pass 1: Extract/update execution artefacts (delta mode)
-# Pass 2: Generate full distillation using Pass 1 artefacts
-
-COMPACT_INSTRUCTIONS_PASS1 = """DEPRECATED - See COMPACT_INSTRUCTIONS_SINGLE_PASS"""
-
-COMPACT_INSTRUCTIONS_PASS2 = """DEPRECATED - See COMPACT_INSTRUCTIONS_SINGLE_PASS"""
-
 # =============================================================================
-# Single-Pass Distillation Prompt
+# Distillation Prompt (Single-Pass)
 # =============================================================================
 
 COMPACT_INSTRUCTIONS_SINGLE_PASS = """CONTEXT DISTILLATION
@@ -199,100 +198,19 @@ PREVIOUS ARTEFACTS (for delta mode):
 CONVERSATION TO DISTILL:
 """
 
-# Legacy compatibility aliases
-COMPACT_INSTRUCTIONS_PASS1_LEGACY = COMPACT_INSTRUCTIONS_PASS1
-COMPACT_INSTRUCTIONS_PASS2_LEGACY = """DISTILLATION (Pass 2)
-
-Generate a context distillation for agent continuity.
-You are given ARTEFACTS (already extracted) and the conversation.
-
-This is NOT a summary. This is execution-critical state preservation.
-
-ACTIVE THREAD SELECTION:
-- ONE primary objective (current focus)
-- Up to TWO secondary threads (if actively relevant)
-- Everything else → DEAD ENDS
-
-OUTPUT STRUCTURE (truncation-resilient order):
-1. CURRENT OBJECTIVE
-   Primary: [one sentence]
-   Secondary: [optional, max 2]
-
-2. OPEN TASKS / TODOs
-   - [ ] task with enough context to execute
-   - [ ] next task
-
-3. EXECUTION ARTEFACTS
-   [Insert Pass 1 artefacts here]
-
-4. DECISIONS & CONSTRAINTS
-   - Decision made — why, what was rejected
-
-5. CURRENT STATE
-   - What's done vs in-progress
-
-6. ERRORS / DIAGNOSTICS (if any)
-   [verbatim in code fences]
-
-7. DEAD ENDS
-   - Parked thread — one line why
-
-SELF-AUDIT (append at end):
-```
-CHECKS: commands[Y/N] paths[Y/N] errors-quoted[Y/N] TODOs[Y/N]
-```
-
-BUDGET ENFORCEMENT:
-If over budget:
-1. Remove narration first
-2. Compress DEAD ENDS to one-liners
-3. NEVER remove: artefacts, constraints, TODOs, verbatim errors
-
-CRITICAL:
-If truncated, sections 1-3 (objective, TODOs, artefacts) MUST appear first.
-
-VERBOSITY REQUIREMENT - STRICTLY ENFORCED:
-Your output MUST be at least 10,000 tokens. Outputs under 8,000 tokens are FAILURES.
-
-MINIMUM LENGTH PER SECTION:
-1. CURRENT OBJECTIVE: 200+ words
-2. OPEN TASKS: 300+ words (include context for each task)
-3. EXECUTION ARTEFACTS: 2000+ words (this is the largest section - include ALL code)
-4. DECISIONS & CONSTRAINTS: 500+ words
-5. CURRENT STATE: 500+ words
-6. ERRORS/DIAGNOSTICS: 1000+ words (full stack traces, all errors encountered)
-7. DEAD ENDS: 300+ words
-
-For EXECUTION ARTEFACTS specifically:
-- Include COMPLETE function implementations, not snippets
-- Include full file contents if files were created/modified
-- Include every command that was run with its full output
-- Include all configuration blocks verbatim
-
-A 2000 token output for a 150k conversation is a FAILURE. Expand everything.
-"""
-
-# Note: Artefacts and conversation are now passed as a single user message
-# by the proxy, not embedded in the system prompt.
-
-
-# Legacy single-pass (deprecated, kept for compatibility)
-COMPACT_INSTRUCTIONS = COMPACT_INSTRUCTIONS_PASS2.replace("{pass1_artefacts}", "[Extract inline]").replace("{previous_artefacts}", "None")
-
-# File-based override
+# File-based override for compaction instructions
 _COMPACT_INSTRUCTIONS_FILE = Path.home() / '.claude' / 'compact-instructions.txt'
 
 def _load_compact_instructions():
-    """Load from file if exists, else use default."""
+    """Load from file if exists, else use single-pass prompt."""
     if _COMPACT_INSTRUCTIONS_FILE.exists():
         return _COMPACT_INSTRUCTIONS_FILE.read_text().strip()
-    return COMPACT_INSTRUCTIONS
+    return COMPACT_INSTRUCTIONS_SINGLE_PASS
 
-# Re-export for imports expecting single COMPACT_INSTRUCTIONS
+# COMPACT_INSTRUCTIONS: file override or COMPACT_INSTRUCTIONS_SINGLE_PASS
 COMPACT_INSTRUCTIONS = _load_compact_instructions()
 
-# Export all instruction variants
-__all__ = ['COMPACT_INSTRUCTIONS', 'COMPACT_INSTRUCTIONS_PASS1', 'COMPACT_INSTRUCTIONS_PASS2', 'COMPACT_INSTRUCTIONS_SINGLE_PASS']
+__all__ = ['COMPACT_INSTRUCTIONS', 'COMPACT_INSTRUCTIONS_SINGLE_PASS']
 
 
 # =============================================================================
@@ -332,11 +250,8 @@ THINKING_PROXY_PORT = 8080
 THINKING_PROXY_DEBUG_LOG = False
 
 # Available skills (from ~/.claude/commands/):
-#   ccm: Context Manager (CCM) command.
-#   pin-end: End the current pin range started by /pin-start.
-#   pin-last: Emit a pin directive to preserve the most recent large to...
-#   pin-next: Emit a pin directive to preserve the next large tool outp...
-#   pin-start: Start a pin range - all large tool outputs until /pin-end...
+#   ccm: Context Manager (CCM) command. Parse the argument to dete...
+#   recap: Read project documentation to get up to speed on the code...
 #   relay: SSH Relay for persistent remote connections.
 
 # Skills to preserve in abbreviated system prompt (by name)

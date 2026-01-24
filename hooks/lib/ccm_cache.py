@@ -391,16 +391,13 @@ def build_ccm_stub(
     description: str = ''
 ) -> str:
     """
-    Build CCM stub format string with source metadata.
+    Build CCM stub format string (minimal fields).
 
     Returns:
         [CCM_CACHED]
         key: sha256:<hex>
-        source: <tool_name> <file_path or command summary>
-        bytes: <uncompressed>
+        ~tokens: <estimated>
         lines: <lines>
-        exit: <exit_code>
-        pinned: <none|soft|hard>
         [/CCM_CACHED]
     """
     hex_key = _key_to_hex(key)
@@ -421,17 +418,18 @@ def build_ccm_stub(
 
     source_line = ' '.join(source_parts) if source_parts else 'unknown'
 
-    # Build stub
+    # Build stub - minimal fields only
     stub_lines = ['[CCM_CACHED]']
     stub_lines.append(f'key: {key}')
-    stub_lines.append(f'source: {source_line}')
-    if description:
-        stub_lines.append(f'desc: {description}')
-    stub_lines.append(f'bytes: {bytes_uncompressed}')
+    # Estimate tokens (~4 chars per token for typical text)
+    est_tokens = bytes_uncompressed // 4
+    if est_tokens >= 1000:
+        stub_lines.append(f'~tokens: {est_tokens // 1000}k')
+    else:
+        stub_lines.append(f'~tokens: {est_tokens}')
     stub_lines.append(f'lines: {lines}')
     if exit_code != 0:
         stub_lines.append(f'exit: {exit_code}')
-    stub_lines.append(f'pinned: {pin_level}')
     stub_lines.append('[/CCM_CACHED]')
 
     return '\n'.join(stub_lines)

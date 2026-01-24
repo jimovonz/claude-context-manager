@@ -6,6 +6,7 @@ Installs hooks and commands to ~/.claude/ and configures settings.json.
 """
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -15,9 +16,6 @@ CLAUDE_DIR = Path.home() / '.claude'
 HOOKS_DIR = CLAUDE_DIR / 'hooks'
 COMMANDS_DIR = CLAUDE_DIR / 'commands'
 SETTINGS_FILE = CLAUDE_DIR / 'settings.json'
-
-# Default autocompact threshold in percent (can be changed in config.py)
-DEFAULT_AUTOCOMPACT_THRESHOLD = "80"
 
 # Default launch args for restart after purge
 DEFAULT_LAUNCH_ARGS = "--dangerously-skip-permissions"
@@ -30,7 +28,6 @@ THINKING_PROXY_PORT = 8080
 # in setup.sh. This ensures normal 'claude' commands work without the proxy.
 HOOK_CONFIG = {
     "env": {
-        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE": DEFAULT_AUTOCOMPACT_THRESHOLD,
         "CLAUDE_LAUNCH_ARGS": DEFAULT_LAUNCH_ARGS
     },
     "hooks": {
@@ -277,6 +274,12 @@ def install():
         existing = {}
 
     merged = merge_settings(existing, HOOK_CONFIG)
+
+    # Clean up stale env vars from previous installs
+    # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE is now set by the 'c' launcher from config.py
+    if 'env' in merged and 'CLAUDE_AUTOCOMPACT_PCT_OVERRIDE' in merged.get('env', {}):
+        del merged['env']['CLAUDE_AUTOCOMPACT_PCT_OVERRIDE']
+
     SETTINGS_FILE.write_text(json.dumps(merged, indent=2) + '\n')
     print("  Done\n")
 

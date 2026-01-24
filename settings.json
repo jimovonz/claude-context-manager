@@ -1,0 +1,59 @@
+{
+  "env": {
+    "CLAUDE_LAUNCH_ARGS": "--dangerously-skip-permissions"
+  },
+  "hooks": {
+    "Setup": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/ccm-setup.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/intercept-bash.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/intercept-glob.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Grep",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/intercept-grep.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Read",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "~/.claude/hooks/intercept-read.py"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "type": "command",
+    "command": "input=$(cat); current_dir=$(echo \"$input\" | jq -r '.workspace.current_dir'); user=$(whoami); host=$(hostname -s); version=$(claude --version 2>/dev/null | head -1 | awk '{print $NF}'); model=$(echo \"$input\" | jq -r '.model.display_name // .model.id // \"\"'); usage=$(echo \"$input\" | jq '.context_window.current_usage'); if [ \"$usage\" != \"null\" ]; then current=$(echo \"$usage\" | jq '.input_tokens + .cache_creation_input_tokens + .cache_read_input_tokens'); size=$(echo \"$input\" | jq '.context_window.context_window_size'); pct=$((current * 100 / size)); context_info=\" [${pct}%]\"; else context_info=\"\"; fi; left=\"${user}@${host}:${current_dir}${context_info}\"; right=\"v${version} ${model}\"; cols=$(tput cols 2>/dev/null || echo 120); pad=$((cols - ${#left} - ${#right})); [ $pad -lt 1 ] && pad=1; printf '%s%*s%s' \"$left\" \"$pad\" '' \"$right\""
+  }
+}

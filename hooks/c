@@ -12,12 +12,39 @@
 
 set -e
 
-# Configuration (override with env vars if needed)
-COMPACT_PCT="${COMPACT_PCT:-95}"
-THINKING_PROXY_PORT="${THINKING_PROXY_PORT:-8080}"
+# Read settings from config.py (env vars override)
+CLAUDE_DIR="$HOME/.claude"
+CONFIG_PY="$CLAUDE_DIR/hooks/config.py"
+
+_read_config() {
+    python3 -c "
+import sys
+sys.path.insert(0, '$CLAUDE_DIR/hooks')
+try:
+    from config import AUTOCOMPACT_THRESHOLD, THINKING_PROXY_ENABLED, THINKING_PROXY_PORT, MAX_THINKING_TOKENS
+    print(f'{AUTOCOMPACT_THRESHOLD}')
+    print(f'{THINKING_PROXY_ENABLED}')
+    print(f'{THINKING_PROXY_PORT}')
+    print(f'{MAX_THINKING_TOKENS}')
+except Exception:
+    print('95')
+    print('True')
+    print('8080')
+    print('10000')
+" 2>/dev/null
+}
+
+_CONFIG_VALUES=($(_read_config))
+_CFG_THRESHOLD="${_CONFIG_VALUES[0]:-95}"
+_CFG_PROXY_ENABLED="${_CONFIG_VALUES[1]:-True}"
+_CFG_PROXY_PORT="${_CONFIG_VALUES[2]:-8080}"
+_CFG_THINKING_TOKENS="${_CONFIG_VALUES[3]:-10000}"
+COMPACT_PCT="${COMPACT_PCT:-$_CFG_THRESHOLD}"
+MAX_THINKING="${MAX_THINKING_TOKENS:-$_CFG_THINKING_TOKENS}"
+THINKING_PROXY_PORT="${THINKING_PROXY_PORT:-$_CFG_PROXY_PORT}"
+THINKING_PROXY_ENABLED="${THINKING_PROXY_ENABLED:-$_CFG_PROXY_ENABLED}"
 SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-true}"
 
-CLAUDE_DIR="$HOME/.claude"
 PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
 PATCHER_SCRIPT="$CLAUDE_DIR/hooks/patch-autocompact.py"
 
@@ -103,7 +130,30 @@ get_patched_cli() {
         fi
     fi
 
-    echo "[CCM] Patches: failed - $result" >&2
+    # Patcher failed - try auto-repair
+    local repair_script="$CLAUDE_DIR/hooks/patch-repair.py"
+    if [[ -f "$repair_script" ]]; then
+        echo "[CCM] Patches failed, attempting auto-repair..." >&2
+        local repair_result
+        repair_result=$("$repair_script" --verbose 2>&1)
+        local repair_exit=$?
+
+        # Show repair stderr output (progress messages)
+        echo "$repair_result" | grep -v '^/' >&2
+
+        if [[ $repair_exit -eq 0 ]]; then
+            local repaired_path
+            repaired_path=$(echo "$repair_result" | grep '^/' | tail -1)
+            if [[ -f "$repaired_path" ]]; then
+                echo "[CCM] Auto-repair: OK" >&2
+                echo "$repaired_path"
+                return 0
+            fi
+        fi
+        echo "[CCM] Auto-repair: failed" >&2
+    fi
+
+    echo "[CCM] Patches: failed, using unpatched CLI" >&2
     echo ""
     return 1
 }
@@ -121,20 +171,22 @@ main() {
     local session_id
     session_id=$(find_session_id "$@")
 
-    ensure_proxy
+    local env_vars=(
+        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
+        "MAX_THINKING_TOKENS=$MAX_THINKING"
+    )
+
+    if [[ "$THINKING_PROXY_ENABLED" == "True" ]]; then
+        ensure_proxy
+        env_vars+=("ANTHROPIC_BASE_URL=http://127.0.0.1:$THINKING_PROXY_PORT")
+        if [[ -n "$session_id" ]]; then
+            env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
+        fi
+    fi
 
     # Get patched CLI (creates persistent copy that survives auto-updates)
     local patched_cli
     patched_cli=$(get_patched_cli)
-
-    local env_vars=(
-        "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
-        "ANTHROPIC_BASE_URL=http://127.0.0.1:$THINKING_PROXY_PORT"
-    )
-
-    if [[ -n "$session_id" ]]; then
-        env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
-    fi
 
     local cmd
     if [[ -n "$patched_cli" && -f "$patched_cli" ]]; then

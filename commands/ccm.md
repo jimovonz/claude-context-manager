@@ -1,4 +1,6 @@
-Context Manager (CCM) command. Parse the argument to determine the action:
+Context Manager (CCM) command. Parse the argument to determine the action.
+
+**Current Session ID:** ${CLAUDE_SESSION_ID}
 
 **Usage:** `/ccm <action>` where action is one of:
 

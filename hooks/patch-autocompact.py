@@ -78,8 +78,8 @@ HOOK_PATTERNS = [
     ('hook blocking error from command', 'hook blocking reply from command'),
 ]
 
-# Hook is_error patch - DISABLED for v2.0.76+ (patterns changed)
-# The minified code structure changed; these patterns no longer exist
+# Hook is_error patch - REMOVED (superseded by hook-level "None - " prefix in json_block)
+# Kept as empty list for compatibility with check/apply logic references.
 HOOK_IS_ERROR_PATTERNS = []
 
 # File injection patch - replace diff injection with minimal notification
@@ -96,8 +96,10 @@ THRESHOLD_PATCHED_RE = r'var\s+[a-zA-Z_$][a-zA-Z0-9_$]*=10000,[a-zA-Z_$][a-zA-Z0
 # Blocking limit patch - align blocking with autocompact threshold instead of available context
 # Original: D=q3A()-mL0 where q3A()=136k (available), mL0=3k → blocks at 133k (67% of 200k)
 # Patched:  D=xs2() where xs2()=autocompact threshold → blocks at same point as autocompact
-# Pattern: D=AVAILABLE_FUNC()-BLOCKING_CONST in ic() function
-BLOCKING_LIMIT_PATTERN_RE = r',([A-Z])=([a-zA-Z0-9_$]+)\(\)-([a-zA-Z0-9_$]+),([A-Z])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
+# Pattern: D=AVAILABLE_FUNC(...)-BLOCKING_CONST in ic() function
+# Note: In 2.1.14+, the function call has args: kE(W,Nq()) instead of just func()
+# The (?:[^)]*(?:\([^)]*\)[^)]*)*) handles one level of nested parentheses
+BLOCKING_LIMIT_PATTERN_RE = r',([A-Za-z_$])=([a-zA-Z0-9_$]+)\((?:[^)]*(?:\([^)]*\)[^)]*)*)\)-([a-zA-Z0-9_$]+),([A-Za-z_$])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
 
 
 def find_cli_path() -> Path | None:
@@ -257,17 +259,17 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
         if 'parseFloat' in window and '/100' in window:
             # Check for the specific patched pattern
             # Math.max(VAR,VAR)}} followed by return
-            patched_pattern = r'Math\.max\([A-Z],[A-Z]\)\}\}return\s+[A-Z]\}'
+            patched_pattern = r'Math\.max\([A-Za-z_$],[A-Za-z_$]\)\}\}return\s+[A-Za-z_$]\}'
             if re.search(patched_pattern, window):
                 trigger_patched = True
                 break
 
-    # Check display patch: xs2() instead of q3A()-uL0
-    # Patched pattern: n=AA?FUNC():void 0 (single function call, no subtraction)
-    # - lowercase var, uppercase bool, function call WITHOUT subtraction
-    patched_display = r'[a-z]=[A-Z]+\?[A-Za-z0-9_$]+\(\):void 0'
-    # Unpatched has subtraction: n=AA?q3A()-uL0:void 0
-    unpatched_display = r'[a-z]=[A-Z]+\?[A-Za-z0-9_$]+\(\)-[A-Za-z0-9_$]+:void 0'
+    # Check display patch: Xk2() instead of s2A()-NC0
+    # Patched pattern: c=a?FUNC():void 0 (single function call, no subtraction)
+    # - lowercase var, bool can be lowercase or uppercase, function call WITHOUT subtraction
+    patched_display = r'[a-z]=[a-zA-Z]+\?[A-Za-z0-9_$]+\(\):void 0'
+    # Unpatched has subtraction: c=a?s2A()-NC0:void 0
+    unpatched_display = r'[a-z]=[a-zA-Z]+\?[A-Za-z0-9_$]+\(\)-[A-Za-z0-9_$]+:void 0'
     if re.search(patched_display, content) and not re.search(unpatched_display, content):
         display_patched = True
 
@@ -328,7 +330,7 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
             blocking_limit_patched = False
         else:
             # Check if the patched pattern exists (D=THRESHOLD_FUNC(),W=...)
-            patched_blocking_pattern = rf',([A-Z])={re.escape(threshold_func)}\(\),([A-Z])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
+            patched_blocking_pattern = rf',([A-Za-z_$])={re.escape(threshold_func)}\(\),([A-Za-z_$])=process\.env\.CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE'
             blocking_limit_patched = bool(re.search(patched_blocking_pattern, content))
 
     return (trigger_patched, display_patched, pct_base_patched, hook_reply_patched, hook_is_error_patched, file_injection_patched, threshold_patched, blocking_limit_patched)
@@ -338,24 +340,38 @@ def find_display_pattern(content: str) -> tuple[int, int, str, str] | None:
     """
     Find the display threshold calculation pattern.
 
-    Looking for: n=AA?q3A()-uL0:void 0
+    Looking for: c=a?s2A()-NC0:void 0
     (where variable names are minified and vary between versions)
 
     The pattern is: VAR=BOOL?FUNC()-CONST:void 0
-    where VAR is lowercase, BOOL is uppercase, FUNC is available context func,
-    CONST is hardcoded buffer constant.
+    where VAR is lowercase, BOOL can be lowercase or uppercase, FUNC is effective context func,
+    CONST is hardcoded buffer constant (NC0=13000).
 
     Returns: (start_offset, end_offset, matched_string, threshold_func) or None
     """
-    # Pattern: n=AA?q3A()-uL0:void 0
-    # - lowercase var (n)
-    # - uppercase bool var (AA)
-    # - function call minus constant
+    # Pattern: c=a?s2A()-NC0:void 0
+    # - lowercase var (c)
+    # - bool var can be lowercase (a) or uppercase (AA) depending on version
+    # - function call minus constant (s2A()-NC0)
     # - void 0 fallback
-    pattern = r'([a-z])=([A-Z]+)\?([A-Za-z0-9_$]+)\(\)-([A-Za-z0-9_$]+):void 0'
+    # Updated pattern to handle both uppercase and lowercase bool vars
+    pattern = r'([a-z])=([a-zA-Z]+)\?([A-Za-z0-9_$]+)\(\)-([A-Za-z0-9_$]+):void 0'
 
     match = re.search(pattern, content)
     if match:
+        # Verify this is the autocompact display pattern by checking context
+        # It should be near "Autocompact buffer" string or in context display code
+        func_name = match.group(3)  # e.g., s2A
+        const_name = match.group(4)  # e.g., NC0
+
+        # Verify the constant is the autocompact buffer (NC0=13000)
+        const_pattern = rf'{re.escape(const_name)}=13000'
+        if not re.search(const_pattern, content):
+            # Also check for the patched threshold value (10000)
+            const_pattern_patched = rf'{re.escape(const_name)}=10000'
+            if not re.search(const_pattern_patched, content):
+                return None
+
         # We need to find what threshold function to use
         # It's typically defined near AUTOCOMPACT_PCT_OVERRIDE
         threshold_func = find_threshold_function_name(content)
@@ -560,23 +576,26 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     else:
         messages.append("Trigger already patched")
 
-    # Patch 2: Display calculation (q3A()-uL0 → xs2())
+    # Patch 2: Display calculation (s2A()-NC0 → Xk2())
     if not display_patched:
         display_result = find_display_pattern(content)
         if display_result:
             start, end, matched, threshold_func = display_result
-            # Replace: n=AA?q3A()-uL0:void 0 → n=AA?xs2():void 0
+            # Replace: c=a?s2A()-NC0:void 0 → c=a?Xk2():void 0
             # Extract variable names from the matched pattern
             import re as re2
-            m = re2.search(r'([a-z])=([A-Z]+)\?', matched)
-            var1, var2 = (m.group(1), m.group(2)) if m else ('n', 'AA')
-            replacement = f'{var1}={var2}?{threshold_func}():void 0'
-
-            if dry_run:
-                messages.append(f"Would patch display: {matched[:30]}... → {replacement}")
+            m = re2.search(r'([a-z])=([a-zA-Z]+)\?', matched)
+            if not m:
+                messages.append(f"Display pattern matched but couldn't extract vars from: {matched[:50]}")
             else:
-                content = content[:start] + replacement + content[end:]
-                messages.append(f"Patched display: →{threshold_func}()")
+                var1, var2 = m.group(1), m.group(2)
+                replacement = f'{var1}={var2}?{threshold_func}():void 0'
+
+                if dry_run:
+                    messages.append(f"Would patch display: {matched[:30]}... → {replacement}")
+                else:
+                    content = content[:start] + replacement + content[end:]
+                    messages.append(f"Patched display: →{threshold_func}()")
         else:
             messages.append("Display pattern not found (may be different CLI version)")
     else:
@@ -701,13 +720,17 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
     verify_content = cli_path.read_text()
     trigger_ok, display_ok, pct_ok, hook_ok, hook_is_error_ok, file_injection_ok, threshold_ok, blocking_ok = check_already_patched(verify_content)
 
-    # Core patches: trigger, hook_reply, hook_is_error, threshold, blocking_limit are essential
-    # file_injection is only required if the pattern exists in the CLI
+    # Core patches: trigger, hook_reply, threshold, blocking_limit are essential
+    # file_injection and hook_is_error are only required if the patterns exist in the CLI
     # Display and pct_base are optional (may not match on all versions)
     file_injection_required = find_file_injection_pattern(content) is not None
     file_injection_check = file_injection_ok or not file_injection_required
 
-    if trigger_ok and hook_ok and hook_is_error_ok and file_injection_check and threshold_ok and blocking_ok:
+    # hook_is_error patterns don't exist in 2.1.14+ (structure changed)
+    hook_is_error_required = any(pat in content for pat, _ in HOOK_IS_ERROR_PATTERNS)
+    hook_is_error_check = hook_is_error_ok or not hook_is_error_required
+
+    if trigger_ok and hook_ok and hook_is_error_check and file_injection_check and threshold_ok and blocking_ok:
         return (True, "; ".join(messages))
     else:
         # Restore backup if we created one
@@ -1045,9 +1068,14 @@ def main():
                 status.append("blocking_limit: pattern not found")
 
         print(f"Status: {'; '.join(status)}")
-        # Core patches: trigger, hook_reply, hook_is_error, threshold, blocking_limit; file_injection only if pattern exists
-        # display and pct_base are optional
-        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_patched and file_injection_ok and threshold_patched and blocking_limit_patched
+        # Core patches: trigger, hook_reply, threshold, blocking_limit
+        # file_injection and hook_is_error only required if patterns exist in CLI
+        # display and pct_base are optional (may not match on all versions)
+        file_injection_required = find_file_injection_pattern(content) is not None
+        hook_is_error_required = any(pat in content for pat, _ in HOOK_IS_ERROR_PATTERNS)
+        file_injection_check = file_injection_patched or not file_injection_required
+        hook_is_error_check = hook_is_error_patched or not hook_is_error_required
+        fully_patched = trigger_patched and hook_reply_patched and hook_is_error_check and file_injection_check and threshold_patched and blocking_limit_patched
         sys.exit(0 if fully_patched else 1)
 
     elif args.restore:

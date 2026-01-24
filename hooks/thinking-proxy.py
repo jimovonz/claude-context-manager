@@ -44,6 +44,7 @@ try:
         COMPACT_INSTRUCTIONS,
         COMPACT_INSTRUCTIONS_SINGLE_PASS,
         PRESERVED_SKILLS,
+        CONTEXT_MAX_TOKENS,
     )
 except ImportError:
     THINKING_PROXY_PORT = 8080
@@ -59,6 +60,7 @@ Preserve: current task, key decisions, file paths, pending actions, errors being
 Be concise. Prioritize actionable context over history."""
     COMPACT_INSTRUCTIONS_SINGLE_PASS = COMPACT_INSTRUCTIONS
     PRESERVED_SKILLS = ['relay', 'ccm', 'pin-next', 'pin-last', 'pin-start', 'pin-end']
+    CONTEXT_MAX_TOKENS = 200000
 
 # Paths
 CLAUDE_DIR = Path.home() / '.claude'
@@ -206,6 +208,64 @@ def is_session_no_thinking(session_id: Optional[str]) -> bool:
         return False
     state_file = STATE_DIR / session_id
     return state_file.exists()
+
+
+class UsageTracker:
+    """Extract token usage from SSE stream events without modifying content.
+
+    Parses message_start and message_delta events to track input/output tokens.
+    Used for dynamic thinking budget calculation.
+    """
+
+    def __init__(self):
+        self.input_tokens: int = 0
+        self.output_tokens: int = 0
+        self.buffer: bytes = b''
+
+    def process_chunk(self, chunk: bytes) -> None:
+        """Scan chunk for usage events. Does not modify the stream."""
+        self.buffer += chunk
+
+        while b'\n\n' in self.buffer:
+            end = self.buffer.find(b'\n\n') + 2
+            event_data = self.buffer[:end]
+            self.buffer = self.buffer[end:]
+            self._parse_event(event_data)
+
+    def flush(self) -> None:
+        """Parse any remaining buffered data."""
+        if self.buffer:
+            self._parse_event(self.buffer)
+            self.buffer = b''
+
+    def _parse_event(self, event_data: bytes) -> None:
+        """Extract usage info from a single SSE event."""
+        try:
+            text = event_data.decode('utf-8')
+        except UnicodeDecodeError:
+            return
+
+        for line in text.split('\n'):
+            if not line.startswith('data: '):
+                continue
+            try:
+                data = json.loads(line[6:])
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            event_type = data.get('type', '')
+
+            if event_type == 'message_start':
+                usage = data.get('message', {}).get('usage', {})
+                self.input_tokens = (
+                    usage.get('input_tokens', 0)
+                    + usage.get('cache_creation_input_tokens', 0)
+                    + usage.get('cache_read_input_tokens', 0)
+                )
+
+            elif event_type == 'message_delta':
+                usage = data.get('usage', {})
+                self.output_tokens = usage.get('output_tokens', self.output_tokens)
 
 
 class ThinkingBlockFilter:
@@ -1081,6 +1141,7 @@ def run_proxy(port: int, debug: bool):
             self.app = web.Application()
             self.app.router.add_route('*', '/{path:.*}', self.handle_request)
             self.session = None
+            self.session_usage = {}  # session_id -> (input_tokens, output_tokens)
 
             # Initialize external compaction handler if enabled
             self.compaction_handler = None
@@ -1240,6 +1301,47 @@ def run_proxy(port: int, debug: bool):
                 return json.dumps(data).encode('utf-8')
             return body
 
+        def _apply_dynamic_thinking_budget(self, body: bytes, session_id: str) -> bytes:
+            """Dynamically reduce max_tokens based on session context usage.
+
+            As the context fills, thinking budget shrinks to prevent HTTP 413.
+            Uses last known usage to estimate next request size.
+            """
+            usage = self.session_usage.get(session_id)
+            if not usage:
+                return body  # No usage data yet, use default
+
+            input_tokens, output_tokens = usage
+
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                return body
+
+            if 'max_tokens' not in data:
+                return body
+
+            context_window = CONTEXT_MAX_TOKENS
+            headroom = 10000  # Reserve for user message growth between turns
+            max_budget = int(os.environ.get('MAX_THINKING_TOKENS', '10000'))
+
+            # Next request will include current output as part of message history
+            estimated_next_input = input_tokens + output_tokens + 2000
+            available = context_window - estimated_next_input
+            dynamic_budget = max(3000, min(max_budget, available))
+
+            old_max = data['max_tokens']
+            if dynamic_budget < old_max:
+                data['max_tokens'] = dynamic_budget
+                logger.info(
+                    f"Dynamic thinking: {old_max} → {dynamic_budget} "
+                    f"(input={input_tokens}, output={output_tokens}, "
+                    f"est_next={estimated_next_input})"
+                )
+                return json.dumps(data).encode('utf-8')
+
+            return body
+
         async def handle_request(self, request):
             """Handle incoming requests and proxy to Anthropic API."""
             await self.start_session()
@@ -1284,6 +1386,10 @@ def run_proxy(port: int, debug: bool):
             if body:
                 body = self._abbreviate_system_prompt(body)
                 body = self._abbreviate_tools(body)
+
+            # Dynamic thinking budget: reduce max_tokens as context fills
+            if body and session_id:
+                body = self._apply_dynamic_thinking_budget(body, session_id)
 
             # Debug log request headers and body
             if self.debug:
@@ -1376,6 +1482,9 @@ def run_proxy(port: int, debug: bool):
                         )
                         await response.prepare(request)
 
+                        # Track usage for dynamic thinking budget
+                        usage_tracker = UsageTracker()
+
                         # Filter thinking blocks based on mode:
                         # - no_thinking: strip entirely
                         # - normal: pass through unchanged
@@ -1391,6 +1500,7 @@ def run_proxy(port: int, debug: bool):
                                 if self.debug:
                                     logger.debug(f"Stream chunk (raw): {chunk}")
 
+                                usage_tracker.process_chunk(chunk)
                                 filtered = filter_obj.process_chunk(chunk)
                                 if filtered:
                                     if self.debug:
@@ -1404,9 +1514,24 @@ def run_proxy(port: int, debug: bool):
                         else:
                             # Pass through unchanged
                             async for chunk in upstream_response.content.iter_any():
+                                usage_tracker.process_chunk(chunk)
                                 await response.write(chunk)
 
+                        usage_tracker.flush()
                         await response.write_eof()
+
+                        # Store usage for next request's dynamic budget
+                        if session_id and usage_tracker.input_tokens > 0:
+                            self.session_usage[session_id] = (
+                                usage_tracker.input_tokens,
+                                usage_tracker.output_tokens,
+                            )
+                            logger.debug(
+                                f"Session {session_id} usage: "
+                                f"input={usage_tracker.input_tokens}, "
+                                f"output={usage_tracker.output_tokens}"
+                            )
+
                         return response
                     else:
                         # Handle non-streaming response
