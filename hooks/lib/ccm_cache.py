@@ -98,7 +98,22 @@ def _ensure_initialized() -> None:
 
 def compute_content_key(content: str) -> str:
     """
-    Compute SHA256 hash of content.
+    Compute BLAKE2s hash of content (64-bit, 16 hex chars).
+    Returns: "b2s:XXXXXXXXXXXXXXXX"
+
+    BLAKE2s with 8-byte digest provides:
+    - 64 bits = 16 hex characters (vs SHA-256's 64)
+    - Negligible collision risk for ~100k items
+    - Built into Python 3.6+
+    """
+    content_bytes = content.encode('utf-8')
+    hash_hex = hashlib.blake2s(content_bytes, digest_size=8).hexdigest()
+    return f"b2s:{hash_hex}"
+
+
+def compute_content_key_sha256(content: str) -> str:
+    """
+    Legacy SHA256 hash computation.
     Returns: "sha256:<64-char-hex>"
     """
     content_bytes = content.encode('utf-8')
@@ -107,10 +122,21 @@ def compute_content_key(content: str) -> str:
 
 
 def _key_to_hex(key: str) -> str:
-    """Extract hex portion from key."""
+    """Extract hex portion from key (supports both b2s: and sha256: prefixes)."""
+    if key.startswith('b2s:'):
+        return key[4:]
     if key.startswith('sha256:'):
         return key[7:]
     return key
+
+
+def _get_key_prefix(key: str) -> str:
+    """Get the prefix/type of a key."""
+    if key.startswith('b2s:'):
+        return 'b2s'
+    if key.startswith('sha256:'):
+        return 'sha256'
+    return 'unknown'
 
 
 def get_compression_method() -> Literal['zstd', 'gzip', 'none']:
