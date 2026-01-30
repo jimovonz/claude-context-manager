@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 """
-Retrieve content from CCM cache with optional filtering.
+Retrieve content from CCM cache with REQUIRED filtering.
+
+Filters force intentional retrieval - you must specify what you need.
 
 Usage:
-    ccm-get.py <key>                      # Full content
     ccm-get.py <key> --grep PATTERN       # Lines matching pattern
     ccm-get.py <key> --head N             # First N lines
     ccm-get.py <key> --tail N             # Last N lines
     ccm-get.py <key> --lines 100-200      # Line range (1-indexed)
     ccm-get.py <key> --grep error -C 3    # Matches with 3 lines context
+    ccm-get.py <key> --grep "." --reason "editing file"  # Full content (requires reason)
     ccm-get.py <key> --info               # Show metadata only
 """
 
+import json
 import re
 import sys
 import argparse
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -24,29 +28,62 @@ from lib.ccm_cache import (
     list_all_keys, get_cache_stats
 )
 
+# Retrieval log for effectiveness analysis
+RETRIEVAL_LOG = Path(__file__).parent / 'retrieval.log'
+
+
+def log_retrieval(key: str, args) -> None:
+    """Log retrieval details for analysis."""
+    try:
+        meta = get_metadata(key)
+        entry = {
+            'timestamp': datetime.now().isoformat(),
+            'key': key[:20] + '...',
+            'filter': {
+                'grep': args.grep,
+                'head': args.head,
+                'tail': args.tail,
+                'lines': args.lines,
+                'context': args.context if args.context else None,
+            },
+            'reason': args.reason if args.reason else None,
+            'is_full_retrieval': args.grep in ('.', '.*', '^', '.*$', '^.*$') if args.grep else False,
+            'source_tool': meta.get('source', {}).get('tool_name') if meta else None,
+            'source_size': meta.get('bytes_uncompressed') if meta else None,
+        }
+        # Remove None values
+        entry['filter'] = {k: v for k, v in entry['filter'].items() if v is not None}
+
+        with open(RETRIEVAL_LOG, 'a') as f:
+            f.write(json.dumps(entry) + '\n')
+    except Exception:
+        pass  # Don't fail retrieval if logging fails
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Retrieve content from CCM cache with optional filtering',
+        description='Retrieve content from CCM cache with REQUIRED filtering',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
+At least one filter is REQUIRED. This forces intentional retrieval.
+
 Examples:
-    ccm-get.py sha256:abc123              # Full content
-    ccm-get.py sha256:abc123 --grep error # Lines containing 'error'
+    ccm-get.py sha256:abc123 --grep error     # Lines containing 'error'
     ccm-get.py sha256:abc123 --grep "error|warn" -C 2  # With context
-    ccm-get.py sha256:abc123 --head 50    # First 50 lines
-    ccm-get.py sha256:abc123 --tail 20    # Last 20 lines
+    ccm-get.py sha256:abc123 --head 50        # First 50 lines
+    ccm-get.py sha256:abc123 --tail 20        # Last 20 lines
     ccm-get.py sha256:abc123 --lines 100-200  # Lines 100-200
-    ccm-get.py sha256:abc123 --info       # Metadata only
-    ccm-get.py --last --grep error        # Filter most recent
+    ccm-get.py sha256:abc123 --grep "." --reason "need full file to edit"  # All content
+
+Full retrieval (--grep ".") requires --reason explaining why filtering isn't possible.
 """
     )
     parser.add_argument('key', nargs='?', help='Cache key (sha256:...)')
 
-    # Filtering options
-    filter_group = parser.add_argument_group('filtering')
+    # Filtering options - at least one required
+    filter_group = parser.add_argument_group('filtering (at least one required)')
     filter_group.add_argument('--grep', '-g', metavar='PATTERN',
-                        help='Filter lines matching regex pattern')
+                        help='Filter lines matching regex pattern (use "." for all, requires --reason)')
     filter_group.add_argument('--head', type=int, metavar='N',
                         help='Show first N lines')
     filter_group.add_argument('--tail', type=int, metavar='N',
@@ -57,6 +94,8 @@ Examples:
                         help='Show N lines of context around grep matches')
     filter_group.add_argument('-i', '--ignore-case', action='store_true',
                         help='Case-insensitive grep')
+    filter_group.add_argument('--reason', metavar='TEXT',
+                        help='Required with --grep "." - explain why full content needed (min 20 chars)')
 
     # Info/listing options
     parser.add_argument('--info', action='store_true',
@@ -148,6 +187,39 @@ Examples:
             print(f"  Reason: {pinned.get('reason', '')}")
             print(f"  Pinned at: {pinned.get('pinned_at', 'unknown')}")
         return
+
+    # Validate: at least one filter required
+    has_filter = any([args.grep, args.head, args.tail, args.lines])
+    if not has_filter:
+        print("Error: At least one filter is required.", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Specify what you need:", file=sys.stderr)
+        print("  --grep PATTERN   Lines matching regex", file=sys.stderr)
+        print("  --head N         First N lines", file=sys.stderr)
+        print("  --tail N         Last N lines", file=sys.stderr)
+        print("  --lines N-M      Line range", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("For full content: --grep \".\" --reason \"why filtering isn't possible\"", file=sys.stderr)
+        sys.exit(1)
+
+    # Validate: --grep "." or ".*" requires --reason
+    is_match_all = args.grep in ('.', '.*', '^', '.*$', '^.*$') if args.grep else False
+    if is_match_all and not args.reason:
+        print("Error: Full retrieval (--grep \".\") requires --reason", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Explain why filtering isn't possible (min 20 chars):", file=sys.stderr)
+        print("  --grep \".\" --reason \"need complete file to edit multiple sections\"", file=sys.stderr)
+        sys.exit(1)
+
+    if args.reason and len(args.reason) < 20:
+        print(f"Error: --reason too short ({len(args.reason)} chars, need 20+)", file=sys.stderr)
+        print("", file=sys.stderr)
+        print("Explain why you need full content, e.g.:", file=sys.stderr)
+        print("  --reason \"editing file, need full context for changes\"", file=sys.stderr)
+        sys.exit(1)
+
+    # Log retrieval for analysis
+    log_retrieval(key, args)
 
     # Get content
     content = retrieve_content(key)

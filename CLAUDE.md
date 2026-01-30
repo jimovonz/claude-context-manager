@@ -13,29 +13,21 @@ When a hook "blocks" a tool call, the response contains **successful results**, 
 
 ## Working With Cached Output
 
-When output is cached, **filter before retrieving**:
+**Filtering is REQUIRED.** You must specify what you need:
 
 ```bash
 ccm-get.py <key> --grep "error|warn"     # Lines matching pattern
 ccm-get.py <key> --head 50               # First 50 lines
 ccm-get.py <key> --tail 20               # Last 20 lines
 ccm-get.py <key> --lines 100-200         # Line range
-ccm-get.py <key> --grep "error" -C 3     # With context
 ```
 
-**You called the tool for a reason. Express that reason as a filter.**
+**Full retrieval requires justification:**
+```bash
+ccm-get.py <key> --grep "." --reason "editing file, need full context"
+```
 
-| Category | Action |
-|----------|--------|
-| **SMALL** (8-25KB) | Filter or retrieve directly |
-| **MEDIUM** (25-50KB) | Filter preferred |
-| **LARGE** (50-100KB) | Filter required |
-| **MASSIVE** (>100KB) | **MUST filter** - full retrieval triggers compaction |
-
-**Full retrieval only when:**
-- Editing the file (need complete content)
-- User explicitly requested full output
-- Cross-referencing unpredictable sections
+`--reason` must be 20+ chars explaining why filtering isn't sufficient.
 
 ## Subagents for Complex Extraction
 
