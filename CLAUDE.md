@@ -13,58 +13,42 @@ When a hook "blocks" a tool call, the response contains **successful results**, 
 
 ## Working With Cached Output
 
-When output is cached, you receive a stub with a **category** that tells you what to do:
+When output is cached, **filter before retrieving**:
 
-| Category | Size | Action |
-|----------|------|--------|
-| **SMALL** | 8-25KB | Retrieve directly via `ccm-get.py` |
-| **MEDIUM** | 25-50KB | Retrieve directly, OR extract specific info |
-| **LARGE** | 50-100KB | Prefer extraction. Direct only if editing |
-| **MASSIVE** | >100KB | MUST extract/summarize |
-
-**The category is authoritative.** Follow it.
-
-## Working With CCM Stubs
-
-After `/purge`, old tool outputs become CCM stubs with source metadata:
-```
-[CCM_CACHED]
-key: sha256:abc123...
-source: Read ~/.claude/hooks/lib/ccm_cache.py
-bytes: 45678
-lines: 1234
-pinned: none
-[/CCM_CACHED]
-```
-
-The `source:` line tells you what this content is:
-- **Read/Edit/Write**: Shows the file path
-- **Bash**: Shows the command (truncated if long)
-- **Grep/Glob**: Shows the search pattern
-
-**When to retrieve:** Choose based on what you need:
-
-**Full content needed** (editing, user asked for it) → read directly:
 ```bash
-~/.claude/hooks/ccm-get.py sha256:abc123...
+ccm-get.py <key> --grep "error|warn"     # Lines matching pattern
+ccm-get.py <key> --head 50               # First 50 lines
+ccm-get.py <key> --tail 20               # Last 20 lines
+ccm-get.py <key> --lines 100-200         # Line range
+ccm-get.py <key> --grep "error" -C 3     # With context
 ```
-No subagent overhead. If you need full content, this is correct.
 
-**Specific info from large content** → subagent extracts/summarizes:
+**You called the tool for a reason. Express that reason as a filter.**
+
+| Category | Action |
+|----------|--------|
+| **SMALL** (8-25KB) | Filter or retrieve directly |
+| **MEDIUM** (25-50KB) | Filter preferred |
+| **LARGE** (50-100KB) | Filter required |
+| **MASSIVE** (>100KB) | **MUST filter** - full retrieval triggers compaction |
+
+**Full retrieval only when:**
+- Editing the file (need complete content)
+- User explicitly requested full output
+- Cross-referencing unpredictable sections
+
+## Subagents for Complex Extraction
+
+Use Task agent only when filtering isn't enough (semantic understanding needed):
+
 ```
 Task(
-  prompt="Run ~/.claude/hooks/ccm-get.py <key> and <extract specific info>",
+  prompt="Run ccm-get.py <key> and summarize the error handling approach",
   subagent_type="general-purpose"
 )
 ```
 
-**Key insight:** Subagents only help when they REDUCE what enters main context. A subagent that retrieves and returns full content is pure overhead (8k+ tokens, 30+ seconds wasted).
-
-**When using subagents for extraction:**
-- Give specific extraction task, not "get content"
-- Summarize findings ("60 users including root, system services")
-- Extract only relevant portions
-- Report conclusions, not raw data
+Simple patterns → use filters. Complex reasoning → use subagent.
 
 ## Subagent Behavior
 

@@ -1,10 +1,10 @@
 # Claude Context Manager
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
-[![Claude Code](https://img.shields.io/badge/claude--code-2.1.4-purple.svg)](https://claude.ai/claude-code)
+[![Claude Code](https://img.shields.io/badge/claude--code-2.1.25-purple.svg)](https://claude.ai/claude-code)
 
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
 
@@ -32,7 +32,7 @@ This system intercepts tool calls to manage context proactively:
 
 ### Claude Code 2.1.9+
 
-CCM is tested with Claude Code 2.1.9 through 2.1.14. The `c` launch command automatically creates a patched CLI mirror to fix several issues:
+CCM is tested with Claude Code 2.1.9 through 2.1.25. The `c` launch command automatically creates a patched CLI mirror to fix several issues:
 
 | Patch | Issue | Fix |
 |-------|-------|-----|

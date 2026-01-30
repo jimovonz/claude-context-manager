@@ -87,11 +87,14 @@ HOOK_IS_ERROR_PATTERNS = []
 FILE_INJECTION_NOTIFICATION = 'Note: ${A.filename} was modified externally. Use Read tool if needed.'
 
 # Threshold values patch - reduce warning/error buffers so they don't trigger until close to autocompact
-# Original: uL0=13000 (autocompact buffer), c97=20000 (warning), p97=20000 (error), mL0=3000 (blocking)
-# Patched:  uL0=10000 (5% of 200k), c97=2000 (warning 1% before), p97=1000 (error 0.5% before)
-# Pattern matches: var VARNAME=13000,VARNAME=20000,VARNAME=20000,VARNAME=3000
-THRESHOLD_PATTERN_RE = r'var\s+([a-zA-Z_$][a-zA-Z0-9_$]*)=13000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=3000'
-THRESHOLD_PATCHED_RE = r'var\s+[a-zA-Z_$][a-zA-Z0-9_$]*=10000,[a-zA-Z_$][a-zA-Z0-9_$]*=2000,[a-zA-Z_$][a-zA-Z0-9_$]*=1000,[a-zA-Z_$][a-zA-Z0-9_$]*=3000'
+# Original: PL2=20000 (reserved), yx6=13000 (autocompact buffer), VL2=20000 (warning), fL2=20000 (error), Ix6=3000 (blocking)
+# Patched:  PL2=20000, yx6=10000 (5% of 200k), VL2=2000 (warning 1% before), fL2=1000 (error 0.5% before), Ix6=3000
+# CLI 2.1.14-: var X=13000,Y=20000,Z=20000,W=3000 (4 vars)
+# CLI 2.1.22+: var PL2=20000,yx6=13000,VL2=20000,fL2=20000,Ix6=3000 (5 vars, different order)
+THRESHOLD_PATTERN_RE_V1 = r'var\s+([a-zA-Z_$][a-zA-Z0-9_$]*)=13000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=3000'
+THRESHOLD_PATTERN_RE_V2 = r'var\s+([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=13000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=20000,([a-zA-Z_$][a-zA-Z0-9_$]*)=3000'
+THRESHOLD_PATCHED_RE_V1 = r'var\s+[a-zA-Z_$][a-zA-Z0-9_$]*=10000,[a-zA-Z_$][a-zA-Z0-9_$]*=2000,[a-zA-Z_$][a-zA-Z0-9_$]*=1000,[a-zA-Z_$][a-zA-Z0-9_$]*=3000'
+THRESHOLD_PATCHED_RE_V2 = r'var\s+[a-zA-Z_$][a-zA-Z0-9_$]*=20000,[a-zA-Z_$][a-zA-Z0-9_$]*=10000,[a-zA-Z_$][a-zA-Z0-9_$]*=2000,[a-zA-Z_$][a-zA-Z0-9_$]*=1000,[a-zA-Z_$][a-zA-Z0-9_$]*=3000'
 
 # Blocking limit patch - align blocking with autocompact threshold instead of available context
 # Original: D=q3A()-mL0 where q3A()=136k (available), mL0=3k → blocks at 133k (67% of 200k)
@@ -312,10 +315,12 @@ def check_already_patched(content: str) -> tuple[bool, bool, bool, bool, bool, b
     file_injection_patched = check_file_injection_patched(content)
 
     # Check threshold patch: reduced warning/error buffers
-    # Patched if new pattern exists and old pattern doesn't
+    # Patched if new pattern exists and old pattern doesn't (check both V1 and V2)
     threshold_patched = (
-        re.search(THRESHOLD_PATCHED_RE, content) is not None and
-        re.search(THRESHOLD_PATTERN_RE, content) is None
+        (re.search(THRESHOLD_PATCHED_RE_V1, content) is not None or
+         re.search(THRESHOLD_PATCHED_RE_V2, content) is not None) and
+        re.search(THRESHOLD_PATTERN_RE_V1, content) is None and
+        re.search(THRESHOLD_PATTERN_RE_V2, content) is None
     )
 
     # Check blocking limit patch: D=xs2() instead of D=q3A()-mL0
@@ -385,7 +390,7 @@ def find_total_context_call(content: str) -> str | None:
     """
     Dynamically find the total context function call by tracing through the code.
 
-    Structure in CLI:
+    CLI 2.1.14- structure:
         function THRESHOLD_FUNC(){
             let A=AVAILABLE_FUNC(), ...
             ...Math.floor(A*(G/100))...
@@ -394,8 +399,18 @@ def find_total_context_call(content: str) -> str | None:
             let A=MODEL_FUNC(), Q=SYS_FUNC(A);
             return CONTEXT_FUNC(A,OTHER_FUNC())-Q
         }
+        -> Want: CONTEXT_FUNC(MODEL_FUNC(),OTHER_FUNC())
 
-    We want: CONTEXT_FUNC(MODEL_FUNC(),OTHER_FUNC()) for total context.
+    CLI 2.1.22+ structure:
+        function THRESHOLD_FUNC(){
+            let A=AVAILABLE_FUNC(),K=A-CONST, ...
+            ...Math.floor(A*(G/100))...
+        }
+        function AVAILABLE_FUNC(){
+            let A=MODEL_FUNC(),K=Math.min(SYS_FUNC(A),CONST);
+            return CONTEXT_FUNC(A,OTHER_FUNC())-K
+        }
+        -> Want: CONTEXT_FUNC(MODEL_FUNC(),OTHER_FUNC())
     """
     # Step 1: Find threshold function (contains AUTOCOMPACT_PCT_OVERRIDE)
     env_pattern = r'AUTOCOMPACT_PCT_OVERRIDE'
@@ -414,7 +429,7 @@ def find_total_context_call(content: str) -> str | None:
     threshold_func = func_def_match.group(1)
 
     # Step 3: Find "let A=FUNC()" at start of threshold function to get available context func
-    # Pattern: function THRESHOLD(){let A=AVAILABLE()
+    # Pattern handles both: "let A=AVAILABLE()" and "let A=AVAILABLE(),K=..."
     threshold_pattern = rf'function\s+{re.escape(threshold_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\)'
     threshold_match = re.search(threshold_pattern, content)
     if not threshold_match:
@@ -423,18 +438,28 @@ def find_total_context_call(content: str) -> str | None:
     available_func = threshold_match.group(2)
 
     # Step 4: Find available context function definition
-    # Pattern: function AVAILABLE(){let A=MODEL(),Q=SYS(A);return CONTEXT(A,OTHER())-Q}
-    available_pattern = rf'function\s+{re.escape(available_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\),([A-Z])=([A-Za-z0-9_$]+)\(\1\);return\s+([A-Za-z0-9_$]+)\(\1,([A-Za-z0-9_$]+)\(\)\)-\3\}}'
-    available_match = re.search(available_pattern, content)
-    if not available_match:
-        return None
+    # Try V1 pattern first (CLI 2.1.14-):
+    # function AVAILABLE(){let A=MODEL(),Q=SYS(A);return CONTEXT(A,OTHER())-Q}
+    available_pattern_v1 = rf'function\s+{re.escape(available_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\),([A-Z])=([A-Za-z0-9_$]+)\(\1\);return\s+([A-Za-z0-9_$]+)\(\1,([A-Za-z0-9_$]+)\(\)\)-\3\}}'
+    available_match = re.search(available_pattern_v1, content)
+    if available_match:
+        model_func = available_match.group(2)      # H3
+        context_func = available_match.group(5)    # Lz
+        other_func = available_match.group(6)      # Iw
+        return f"{context_func}({model_func}(),{other_func}())"
 
-    model_func = available_match.group(2)      # H3
-    context_func = available_match.group(5)    # Lz
-    other_func = available_match.group(6)      # Iw
+    # Try V2 pattern (CLI 2.1.22+):
+    # function AVAILABLE(){let A=MODEL(),K=Math.min(SYS(A),CONST);return CONTEXT(A,OTHER())-K}
+    # Note: [^()]*\([^)]*\)[^)]* handles one level of nested parens in Math.min(Sx6(A),PL2)
+    available_pattern_v2 = rf'function\s+{re.escape(available_func)}\(\)\{{let\s+([A-Z])=([A-Za-z0-9_$]+)\(\),([A-Z])=Math\.min\([^()]*\([^)]*\)[^)]*\);return\s+([A-Za-z0-9_$]+)\(\1,([A-Za-z0-9_$]+)\(\)\)-\3\}}'
+    available_match = re.search(available_pattern_v2, content)
+    if available_match:
+        model_func = available_match.group(2)      # Z3
+        context_func = available_match.group(4)    # iW
+        other_func = available_match.group(5)      # nP
+        return f"{context_func}({model_func}(),{other_func}())"
 
-    # Step 5: Build total context call
-    return f"{context_func}({model_func}(),{other_func}())"
+    return None
 
 
 def find_pct_base_pattern(content: str) -> tuple[int, int, str, str, str] | None:
@@ -507,14 +532,14 @@ def find_file_injection_pattern(content: str) -> tuple[int, int, str, str, str] 
     Looking for: case"edited_text_file":return XX([YY({content:`Note: ${A.filename} was modified...
     ...${A.snippet}`,isMeta:!0})]);
 
-    Where XX and YY are minified function names (e.g., V5, F5, $0, C0).
+    Where XX and YY are minified function names (e.g., V5, F5, $0, C0, AY, t1).
 
     Returns: (start_offset, end_offset, matched_string, func1, func2) or None
     """
     # The pattern includes a template literal with embedded newline
     # We need to match from case"edited_text_file" to the closing ])]);
-    # Use flexible function name matching for minified code
-    pattern = r'case"edited_text_file":return ([A-Z0-9]+)\(\[([A-Z0-9]+)\(\{content:`[^`]*\$\{A\.snippet\}`,[^)]+\)\]\)'
+    # Use flexible function name matching for minified code (including lowercase)
+    pattern = r'case"edited_text_file":return ([a-zA-Z_$][a-zA-Z0-9_$]*)\(\[([a-zA-Z_$][a-zA-Z0-9_$]*)\(\{content:`[^`]*\$\{A\.snippet\}`,[^)]+\)\]\)'
 
     match = re.search(pattern, content, re.DOTALL)
     if match:
@@ -525,8 +550,8 @@ def find_file_injection_pattern(content: str) -> tuple[int, int, str, str, str] 
 
 def check_file_injection_patched(content: str) -> bool:
     """Check if file injection is already patched (uses minimal notification)."""
-    # Check if the patched pattern exists - use flexible function names
-    patched_pattern = r'case"edited_text_file":return [A-Z0-9]+\(\[[A-Z0-9]+\(\{content:`Note: \$\{A\.filename\} was modified externally\. Use Read tool if needed\.`'
+    # Check if the patched pattern exists - use flexible function names (including lowercase)
+    patched_pattern = r'case"edited_text_file":return [a-zA-Z_$][a-zA-Z0-9_$]*\(\[[a-zA-Z_$][a-zA-Z0-9_$]*\(\{content:`Note: \$\{A\.filename\} was modified externally\. Use Read tool if needed\.`'
     return bool(re.search(patched_pattern, content))
 
 
@@ -672,19 +697,34 @@ def apply_patch(cli_path: Path, dry_run: bool = False, create_backup: bool = Tru
 
     # Patch 7: Threshold values (reduced warning/error buffers)
     if not threshold_patched:
-        threshold_match = re.search(THRESHOLD_PATTERN_RE, content)
+        # Try V1 pattern first (CLI 2.1.14-)
+        threshold_match = re.search(THRESHOLD_PATTERN_RE_V1, content)
         if threshold_match:
-            # Extract variable names from the match to preserve them
+            # V1: var X=13000,Y=20000,Z=20000,W=3000
             var1, var2, var3, var4 = threshold_match.groups()
             old_str = threshold_match.group(0)
             new_str = f'var {var1}=10000,{var2}=2000,{var3}=1000,{var4}=3000'
             if dry_run:
-                messages.append(f"Would patch thresholds: {old_str} → {new_str}")
+                messages.append(f"Would patch thresholds (V1): {old_str} → {new_str}")
             else:
                 content = content[:threshold_match.start()] + new_str + content[threshold_match.end():]
-                messages.append("Patched thresholds: warning/error buffers reduced")
+                messages.append("Patched thresholds (V1): warning/error buffers reduced")
         else:
-            messages.append("Threshold pattern not found (may be different CLI version)")
+            # Try V2 pattern (CLI 2.1.22+)
+            threshold_match = re.search(THRESHOLD_PATTERN_RE_V2, content)
+            if threshold_match:
+                # V2: var PL2=20000,yx6=13000,VL2=20000,fL2=20000,Ix6=3000
+                var1, var2, var3, var4, var5 = threshold_match.groups()
+                old_str = threshold_match.group(0)
+                # Keep var1 (reserved=20000), patch var2-4, keep var5 (blocking=3000)
+                new_str = f'var {var1}=20000,{var2}=10000,{var3}=2000,{var4}=1000,{var5}=3000'
+                if dry_run:
+                    messages.append(f"Would patch thresholds (V2): {old_str} → {new_str}")
+                else:
+                    content = content[:threshold_match.start()] + new_str + content[threshold_match.end():]
+                    messages.append("Patched thresholds (V2): warning/error buffers reduced")
+            else:
+                messages.append("Threshold pattern not found (may be different CLI version)")
     else:
         messages.append("Thresholds already patched")
 
@@ -1054,8 +1094,10 @@ def main():
         if threshold_patched:
             status.append("threshold: OK")
         else:
-            if re.search(THRESHOLD_PATTERN_RE, content):
-                status.append("threshold: NEEDS PATCH")
+            if re.search(THRESHOLD_PATTERN_RE_V1, content):
+                status.append("threshold: NEEDS PATCH (V1)")
+            elif re.search(THRESHOLD_PATTERN_RE_V2, content):
+                status.append("threshold: NEEDS PATCH (V2)")
             else:
                 status.append("threshold: pattern not found")
 

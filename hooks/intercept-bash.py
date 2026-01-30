@@ -17,8 +17,9 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
-    build_retrieval_guidance, log_metric, run_command, probe_command,
+    build_retrieval_guidance, build_duplicate_stub, log_metric, run_command, probe_command,
     get_command_classification, is_cached_interactive, learn_command_classification,
+    is_key_seen, mark_key_seen, should_show_guidance, mark_guidance_shown,
     BASH_THRESHOLD, CACHE_DIR
 )
 
@@ -186,12 +187,23 @@ def main():
             cwd=cwd
         )
         log_metric("Bash", "cached", size)
+
+        # Check if this key was seen before in this session (deduplication)
+        if is_key_seen(transcript_path, cache_key):
+            reason = f"{build_duplicate_stub(cache_key)}\nRetrieve: ~/.claude/hooks/ccm-get.py {cache_key}"
+            json_block(reason, exit_code=exit_code)
+            return
+
+        mark_key_seen(transcript_path, cache_key)
         reason = build_ccm_cache_response(cache_key, lines, size, exit_code, cmd)
 
-        # Add size-proportional retrieval guidance
-        guidance = build_retrieval_guidance(size, lines)
+        # Add retrieval guidance - verbose only on first cache in session
+        verbose = should_show_guidance(transcript_path)
+        guidance = build_retrieval_guidance(size, lines, verbose=verbose)
         if guidance:
             reason = reason + guidance
+        if verbose:
+            mark_guidance_shown(transcript_path)
 
         json_block(reason, exit_code=exit_code)
 

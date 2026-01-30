@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Retrieve content from CCM cache by key.
+Retrieve content from CCM cache with optional filtering.
 
 Usage:
-    ccm-get.py <key>           # Output content to stdout
-    ccm-get.py <key> --info    # Show metadata only
-    ccm-get.py --last          # Get most recently cached item
-    ccm-get.py --list          # List recent cache entries
+    ccm-get.py <key>                      # Full content
+    ccm-get.py <key> --grep PATTERN       # Lines matching pattern
+    ccm-get.py <key> --head N             # First N lines
+    ccm-get.py <key> --tail N             # Last N lines
+    ccm-get.py <key> --lines 100-200      # Line range (1-indexed)
+    ccm-get.py <key> --grep error -C 3    # Matches with 3 lines context
+    ccm-get.py <key> --info               # Show metadata only
 """
 
+import re
 import sys
 import argparse
 from pathlib import Path
@@ -23,20 +27,39 @@ from lib.ccm_cache import (
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Retrieve content from CCM cache',
+        description='Retrieve content from CCM cache with optional filtering',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    ccm-get.py sha256:abc123...         # Get content by key
-    ccm-get.py sha256:abc123 --info     # Show metadata
-    ccm-get.py --last                   # Get most recent
-    ccm-get.py --last --info            # Info on most recent
-    ccm-get.py --list                   # List recent keys
-    ccm-get.py --stats                  # Show cache statistics
+    ccm-get.py sha256:abc123              # Full content
+    ccm-get.py sha256:abc123 --grep error # Lines containing 'error'
+    ccm-get.py sha256:abc123 --grep "error|warn" -C 2  # With context
+    ccm-get.py sha256:abc123 --head 50    # First 50 lines
+    ccm-get.py sha256:abc123 --tail 20    # Last 20 lines
+    ccm-get.py sha256:abc123 --lines 100-200  # Lines 100-200
+    ccm-get.py sha256:abc123 --info       # Metadata only
+    ccm-get.py --last --grep error        # Filter most recent
 """
     )
     parser.add_argument('key', nargs='?', help='Cache key (sha256:...)')
-    parser.add_argument('--info', '-i', action='store_true',
+
+    # Filtering options
+    filter_group = parser.add_argument_group('filtering')
+    filter_group.add_argument('--grep', '-g', metavar='PATTERN',
+                        help='Filter lines matching regex pattern')
+    filter_group.add_argument('--head', type=int, metavar='N',
+                        help='Show first N lines')
+    filter_group.add_argument('--tail', type=int, metavar='N',
+                        help='Show last N lines')
+    filter_group.add_argument('--lines', metavar='START-END',
+                        help='Show line range (1-indexed, e.g., 100-200)')
+    filter_group.add_argument('-C', '--context', type=int, default=0, metavar='N',
+                        help='Show N lines of context around grep matches')
+    filter_group.add_argument('-i', '--ignore-case', action='store_true',
+                        help='Case-insensitive grep')
+
+    # Info/listing options
+    parser.add_argument('--info', action='store_true',
                         help='Show metadata instead of content')
     parser.add_argument('--last', '-l', action='store_true',
                         help='Use most recently cached key')
@@ -132,9 +155,76 @@ Examples:
         print(f"Key not found or content unavailable: {key}", file=sys.stderr)
         sys.exit(1)
 
-    # Output to stdout
-    sys.stdout.write(content)
-    if not content.endswith('\n'):
+    lines = content.splitlines()
+    original_count = len(lines)
+    filtered = False
+
+    # Apply filters in order: lines range → grep → head/tail
+    # This allows: --grep error --head 10 = "first 10 errors"
+
+    # Line range filter (1-indexed) - applied first to limit search scope
+    if args.lines:
+        try:
+            if '-' in args.lines:
+                start, end = args.lines.split('-', 1)
+                start = int(start) if start else 1
+                end = int(end) if end else len(lines)
+            else:
+                start = end = int(args.lines)
+            # Convert to 0-indexed
+            lines = lines[max(0, start-1):end]
+            filtered = True
+        except ValueError:
+            print(f"Invalid line range: {args.lines}", file=sys.stderr)
+            sys.exit(1)
+
+    # Grep filter - before head/tail so --head N means "first N matches"
+    if args.grep:
+        try:
+            flags = re.IGNORECASE if args.ignore_case else 0
+            pattern = re.compile(args.grep, flags)
+        except re.error as e:
+            print(f"Invalid regex: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        if args.context > 0:
+            # Grep with context
+            matched_indices = set()
+            for i, line in enumerate(lines):
+                if pattern.search(line):
+                    for j in range(max(0, i - args.context), min(len(lines), i + args.context + 1)):
+                        matched_indices.add(j)
+
+            result_lines = []
+            prev_idx = -2
+            for i in sorted(matched_indices):
+                if prev_idx >= 0 and i > prev_idx + 1:
+                    result_lines.append('--')  # Context separator
+                result_lines.append(lines[i])
+                prev_idx = i
+            lines = result_lines
+        else:
+            # Simple grep
+            lines = [l for l in lines if pattern.search(l)]
+        filtered = True
+
+    # Head filter - after grep, so --grep X --head N = "first N matches"
+    if args.head:
+        lines = lines[:args.head]
+        filtered = True
+
+    # Tail filter - after grep, so --grep X --tail N = "last N matches"
+    if args.tail:
+        lines = lines[-args.tail:]
+        filtered = True
+
+    # Output
+    if filtered:
+        print(f"[Filtered: {len(lines)} of {original_count} lines]", file=sys.stderr)
+
+    output = '\n'.join(lines)
+    sys.stdout.write(output)
+    if output and not output.endswith('\n'):
         sys.stdout.write('\n')
 
 

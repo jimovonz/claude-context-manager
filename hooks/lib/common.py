@@ -33,6 +33,9 @@ CCM_COMPRESSION = 'auto'
 CCM_DEFAULT_PIN_LEVEL = 'soft'
 CCM_STUB_THRESHOLD_BYTES = 5000
 
+# Session state for deduplication and adaptive verbosity
+SESSION_STATE_DIR = CACHE_DIR / 'session_state'
+
 # Load config if exists
 if CONFIG_FILE.exists():
     _config = {}
@@ -63,6 +66,84 @@ def check_passthrough() -> None:
     if os.environ.get('CLAUDE_HOOKS_PASSTHROUGH') == '1':
         print('{}')
         sys.exit(0)
+
+
+def _get_session_id(transcript_path: str) -> str:
+    """Extract session ID from transcript path."""
+    if not transcript_path:
+        return 'unknown'
+    # Transcript path is like: ~/.claude/projects/.../session_id.jsonl
+    return Path(transcript_path).stem
+
+
+def _get_session_state_path(session_id: str) -> Path:
+    """Get path to session state file."""
+    SESSION_STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return SESSION_STATE_DIR / f'{session_id}.json'
+
+
+def _load_session_state(session_id: str) -> dict:
+    """Load session state, cleaning up old sessions."""
+    # Clean old session state files (>24h)
+    try:
+        cutoff = datetime.now().timestamp() - 86400
+        for f in SESSION_STATE_DIR.glob('*.json'):
+            if f.stat().st_mtime < cutoff:
+                f.unlink()
+    except (OSError, FileNotFoundError):
+        pass
+
+    state_path = _get_session_state_path(session_id)
+    if state_path.exists():
+        try:
+            return json.loads(state_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            pass
+    return {'seen_keys': [], 'guidance_shown': False}
+
+
+def _save_session_state(session_id: str, state: dict) -> None:
+    """Save session state."""
+    try:
+        state_path = _get_session_state_path(session_id)
+        state_path.write_text(json.dumps(state))
+    except OSError:
+        pass
+
+
+def is_key_seen(transcript_path: str, cache_key: str) -> bool:
+    """Check if a cache key has been seen in this session."""
+    session_id = _get_session_id(transcript_path)
+    state = _load_session_state(session_id)
+    return cache_key in state.get('seen_keys', [])
+
+
+def mark_key_seen(transcript_path: str, cache_key: str) -> bool:
+    """Mark a cache key as seen. Returns True if this was first time."""
+    session_id = _get_session_id(transcript_path)
+    state = _load_session_state(session_id)
+    seen_keys = state.get('seen_keys', [])
+    first_time = cache_key not in seen_keys
+    if first_time:
+        seen_keys.append(cache_key)
+        state['seen_keys'] = seen_keys
+        _save_session_state(session_id, state)
+    return first_time
+
+
+def should_show_guidance(transcript_path: str) -> bool:
+    """Check if full guidance should be shown (first cache in session)."""
+    session_id = _get_session_id(transcript_path)
+    state = _load_session_state(session_id)
+    return not state.get('guidance_shown', False)
+
+
+def mark_guidance_shown(transcript_path: str) -> None:
+    """Mark that guidance has been shown for this session."""
+    session_id = _get_session_id(transcript_path)
+    state = _load_session_state(session_id)
+    state['guidance_shown'] = True
+    _save_session_state(session_id, state)
 
 
 def is_subagent(transcript_path: str, tool_use_id: str) -> bool:
@@ -182,11 +263,9 @@ def build_ccm_cache_response(
             pin_level = meta.get('pinned', {}).get('level', 'none') if meta else 'none'
 
             stub = build_ccm_stub(key, size, lines, exit_code, pin_level)
-            # Just stub + original + key for retrieval
-            # Category-based guidance is added by the intercept hooks
+            # Compact retrieval line with filter hint
             return f"""{stub}
-Original: {original}
-Retrieve: ~/.claude/hooks/ccm-get.py {key}"""
+Retrieve: ccm-get.py {key} [--grep PATTERN] [--head N] [--lines N-M]"""
         except ImportError:
             pass
 
@@ -207,8 +286,8 @@ def get_size_category(size: int) -> tuple[str, str, str]:
         # SMALL: 8-25KB (~2-6k tokens)
         return (
             "SMALL",
-            f"Retrieve directly ({tokens_k:.0f}k tokens)",
-            "OPTIONS: 1. Retrieve directly via ccm-get.py (recommended for SMALL) 2. Subagent to extract specific info"
+            f"{tokens_k:.0f}k tokens",
+            "Filter or full retrieval OK"
         )
 
     elif size < 50000:
@@ -216,7 +295,7 @@ def get_size_category(size: int) -> tuple[str, str, str]:
         return (
             "MEDIUM",
             f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context)",
-            "OPTIONS: 1. Retrieve directly if ALL content needed 2. Subagent to extract/summarize if only partial info needed"
+            "Use --grep/--head/--lines to filter. Full only if editing."
         )
 
     elif size < 100000:
@@ -224,22 +303,45 @@ def get_size_category(size: int) -> tuple[str, str, str]:
         return (
             "LARGE",
             f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context)",
-            "OPTIONS: 1. Retrieve directly ONLY if editing entire file 2. Subagent to extract/summarize (recommended for LARGE)"
+            "FILTER REQUIRED: --grep PATTERN or --lines N-M. Full retrieval only for editing."
         )
 
     else:
         # MASSIVE: >100KB (~25k+ tokens)
         return (
             "MASSIVE",
-            f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context) - will trigger compaction",
-            "OPTIONS: 1. DO NOT retrieve fully - will destroy context 2. MUST use subagent to extract/summarize specific info"
+            f"{tokens_k:.0f}k tokens ({context_pct:.0f}% context)",
+            "MUST FILTER. Full retrieval will trigger compaction. Use --grep/--head/--tail."
         )
 
 
-def build_retrieval_guidance(size: int, lines: int) -> str:
-    """Build size-proportional retrieval guidance with category and options."""
+def build_retrieval_guidance(size: int, lines: int, verbose: bool = True) -> str:
+    """Build size-proportional retrieval guidance with category and options.
+
+    Args:
+        size: Content size in bytes
+        lines: Number of lines
+        verbose: If True, include full OPTIONS text. If False, minimal format.
+    """
     category, guidance, options = get_size_category(size)
-    return f"\ncategory: {category}\nguidance: {guidance}\n{options}"
+    if verbose:
+        return f"\ncategory: {category}\nguidance: {guidance}\n{options}"
+    else:
+        # Minimal format for subsequent stubs
+        return f"\ncategory: {category}"
+
+
+def build_duplicate_stub(cache_key: str) -> str:
+    """Build minimal stub for duplicate cache reference.
+
+    Returns something like: [CCM: sha256:abc123... - see earlier]
+    """
+    # Truncate key for display
+    if len(cache_key) > 20:
+        short_key = cache_key[:20] + '...'
+    else:
+        short_key = cache_key
+    return f"[CCM: {short_key} - see earlier in conversation]"
 
 
 def json_block(reason: str, exit_code: int = None) -> None:

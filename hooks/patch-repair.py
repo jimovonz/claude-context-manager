@@ -223,8 +223,17 @@ def extract_context(content, anchor, before=200, after=800, anchor_alt=None):
 def build_repair_prompt(failed_patches, cli_content, cli_path):
     """Build a focused prompt for Claude to identify new patterns."""
     prompt_parts = [
-        "You are analyzing a minified JavaScript CLI file to identify code patterns for patching.",
-        f"CLI file: {cli_path}",
+        "# Context Management System - Patch Repair",
+        "",
+        "You are repairing patches for the Claude Context Manager (CCM) system.",
+        "Read ALL .md files in this project and ~/.claude/hooks/ to understand the system.",
+        "",
+        "## Background",
+        "CCM intercepts Claude CLI's autocompact to use external context management.",
+        "The CLI is minified JS where variable names change each build, but string",
+        "literals (env var names, message types) remain stable anchors.",
+        "",
+        f"## Task: Repair patches for {cli_path}",
         "",
         "For each patch below, I provide:",
         "- The INTENT (what the patch should accomplish)",
@@ -240,7 +249,7 @@ def build_repair_prompt(failed_patches, cli_content, cli_path):
         "",
         "CRITICAL RULES:",
         "- 'old' must be an EXACT substring of the provided context",
-        "- Same-length constraints must be respected",
+        "- Same-length constraints must be respected (pad with spaces if needed)",
         "- Variable names change between versions - match the CURRENT code, not the examples",
         "- If you cannot find the pattern, set found=false and explain in notes",
         "",
@@ -293,12 +302,25 @@ def build_repair_prompt(failed_patches, cli_content, cli_path):
 
 
 def call_claude(prompt, verbose=False):
-    """Call Claude CLI in non-interactive mode."""
+    """Call Claude CLI in non-interactive mode from project directory."""
     if verbose:
         print("  Calling Claude for pattern analysis...", file=sys.stderr)
 
-    cmd = ['claude', '--print', '-p', prompt]
-    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    # Run from project directory so Claude picks up CLAUDE.md context
+    project_dir = Path.home() / 'Projects' / 'claude-context-manager'
+    cwd = str(project_dir) if project_dir.exists() else None
+
+    # Prepend instruction to read documentation
+    full_prompt = (
+        "IMPORTANT: First read ALL .md files in this project and ~/.claude/hooks/ "
+        "to understand the patching system's purpose and architecture. "
+        "The patches modify Claude CLI's autocompact behavior to work with an external "
+        "context management system.\n\n"
+        + prompt
+    )
+
+    cmd = ['claude', '--print', '-p', full_prompt]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=180, cwd=cwd)
 
     if result.returncode != 0:
         if verbose:

@@ -13,7 +13,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from lib.common import (
     init_cache, check_passthrough, parse_hook_input, get_common_fields,
     allow_if_subagent, json_block, json_pass, cache_output_ccm, build_ccm_cache_response,
-    build_retrieval_guidance, log_metric, READ_THRESHOLD
+    build_retrieval_guidance, build_duplicate_stub, log_metric, READ_THRESHOLD,
+    is_key_seen, mark_key_seen, should_show_guidance, mark_guidance_shown
 )
 
 # File patterns that should never be intercepted (full content required)
@@ -120,12 +121,27 @@ def main():
     )
     log_metric("Read", "cached", file_size)
 
+    # Check if this key was seen before in this session (deduplication)
+    if is_key_seen(transcript_path, cache_key):
+        # Return minimal duplicate stub
+        reason = f"{build_duplicate_stub(cache_key)}\nRetrieve: ~/.claude/hooks/ccm-get.py {cache_key}"
+        json_block(reason, exit_code=0)
+        return
+
+    # Mark key as seen
+    mark_key_seen(transcript_path, cache_key)
+
     reason = build_ccm_cache_response(cache_key, lines, file_size, 0, str(file_path))
 
-    # Add size-proportional retrieval guidance
-    guidance = build_retrieval_guidance(file_size, lines)
+    # Add retrieval guidance - verbose only on first cache in session
+    verbose = should_show_guidance(transcript_path)
+    guidance = build_retrieval_guidance(file_size, lines, verbose=verbose)
     if guidance:
         reason = reason + guidance
+
+    # Mark guidance as shown after first cache
+    if verbose:
+        mark_guidance_shown(transcript_path)
 
     json_block(reason, exit_code=0)
 
