@@ -56,6 +56,14 @@ THINKING_PROXY_ENABLED="${THINKING_PROXY_ENABLED:-$_CFG_PROXY_ENABLED}"
 SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-true}"
 HAS_EXTERNAL_COMPACTION="$_CFG_HAS_EXTERNAL"
 
+# Safety check: warn if threshold >85% without external compaction
+if [[ "$HAS_EXTERNAL_COMPACTION" != "True" && "$COMPACT_PCT" -gt 85 ]] 2>/dev/null; then
+    echo "[CCM] ⚠ WARNING: COMPACT_PCT=$COMPACT_PCT without OpenRouter API key" >&2
+    echo "[CCM]   Claude needs ~20% buffer for its compaction summary." >&2
+    echo "[CCM]   Values >85% may cause compaction failures. Capping at 85%." >&2
+    COMPACT_PCT=85
+fi
+
 PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
 PATCHER_SCRIPT="$CLAUDE_DIR/hooks/patch-autocompact.py"
 
@@ -197,8 +205,11 @@ main() {
 
     # Warn if external compaction not available
     if [[ "$HAS_EXTERNAL_COMPACTION" != "True" ]]; then
-        echo "[CCM] ⚠ No OpenRouter API key - using basic mode (threshold: ${COMPACT_PCT}%)" >&2
-        echo "[CCM]   For full benefit, see: ~/.claude-ccm/README.md#two-modes-of-operation" >&2
+        echo "[CCM] ⚠ No OpenRouter API key - basic mode" >&2
+        echo "[CCM]   Claude reserves ~20% context for its compaction summary." >&2
+        echo "[CCM]   Threshold capped at ${COMPACT_PCT}% to preserve this buffer." >&2
+        echo "[CCM]   With OpenRouter: external LLM handles compaction → 95% usable." >&2
+        echo "[CCM]   Setup: ~/.claude-ccm/README.md#two-modes-of-operation" >&2
     fi
 
     # Get patched CLI (creates persistent copy that survives auto-updates)
