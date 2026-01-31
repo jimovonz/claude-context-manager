@@ -21,29 +21,40 @@ _read_config() {
 import sys
 sys.path.insert(0, '$CLAUDE_DIR/hooks')
 try:
-    from config import AUTOCOMPACT_THRESHOLD, THINKING_PROXY_ENABLED, THINKING_PROXY_PORT, MAX_THINKING_TOKENS
-    print(f'{AUTOCOMPACT_THRESHOLD}')
+    from config import (
+        AUTOCOMPACT_THRESHOLD, THINKING_PROXY_ENABLED, THINKING_PROXY_PORT,
+        MAX_THINKING_TOKENS, OPENROUTER_API_KEY, EXTERNAL_COMPACTION_ENABLED
+    )
+    # Only use aggressive threshold if external compaction is available
+    # Without OpenRouter, Claude needs its 22.5k buffer - use safer 85%
+    has_external = EXTERNAL_COMPACTION_ENABLED and OPENROUTER_API_KEY
+    threshold = AUTOCOMPACT_THRESHOLD if has_external else min(AUTOCOMPACT_THRESHOLD, 85)
+    print(f'{threshold}')
     print(f'{THINKING_PROXY_ENABLED}')
     print(f'{THINKING_PROXY_PORT}')
     print(f'{MAX_THINKING_TOKENS}')
+    print(f'{has_external}')
 except Exception:
-    print('95')
+    print('85')
     print('True')
     print('8080')
     print('10000')
+    print('False')
 " 2>/dev/null
 }
 
 _CONFIG_VALUES=($(_read_config))
-_CFG_THRESHOLD="${_CONFIG_VALUES[0]:-95}"
+_CFG_THRESHOLD="${_CONFIG_VALUES[0]:-85}"
 _CFG_PROXY_ENABLED="${_CONFIG_VALUES[1]:-True}"
 _CFG_PROXY_PORT="${_CONFIG_VALUES[2]:-8080}"
 _CFG_THINKING_TOKENS="${_CONFIG_VALUES[3]:-10000}"
+_CFG_HAS_EXTERNAL="${_CONFIG_VALUES[4]:-False}"
 COMPACT_PCT="${COMPACT_PCT:-$_CFG_THRESHOLD}"
 MAX_THINKING="${MAX_THINKING_TOKENS:-$_CFG_THINKING_TOKENS}"
 THINKING_PROXY_PORT="${THINKING_PROXY_PORT:-$_CFG_PROXY_PORT}"
 THINKING_PROXY_ENABLED="${THINKING_PROXY_ENABLED:-$_CFG_PROXY_ENABLED}"
 SKIP_PERMISSIONS="${SKIP_PERMISSIONS:-true}"
+HAS_EXTERNAL_COMPACTION="$_CFG_HAS_EXTERNAL"
 
 PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
 PATCHER_SCRIPT="$CLAUDE_DIR/hooks/patch-autocompact.py"
@@ -182,6 +193,12 @@ main() {
         if [[ -n "$session_id" ]]; then
             env_vars+=("ANTHROPIC_CUSTOM_HEADERS=X-CCM-Session-ID:$session_id")
         fi
+    fi
+
+    # Warn if external compaction not available
+    if [[ "$HAS_EXTERNAL_COMPACTION" != "True" ]]; then
+        echo "[CCM] ⚠ No OpenRouter API key - using basic mode (threshold: ${COMPACT_PCT}%)" >&2
+        echo "[CCM]   For full benefit, see: ~/.claude-ccm/README.md#two-modes-of-operation" >&2
     fi
 
     # Get patched CLI (creates persistent copy that survives auto-updates)
