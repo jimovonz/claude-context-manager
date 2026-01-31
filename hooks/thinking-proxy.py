@@ -45,6 +45,7 @@ try:
         COMPACT_INSTRUCTIONS_SINGLE_PASS,
         PRESERVED_SKILLS,
         CONTEXT_MAX_TOKENS,
+        get_compaction_prompt,
     )
     # Optional: project context extraction
     try:
@@ -66,6 +67,8 @@ Be concise. Prioritize actionable context over history."""
     COMPACT_INSTRUCTIONS_SINGLE_PASS = COMPACT_INSTRUCTIONS
     PRESERVED_SKILLS = ['relay', 'ccm', 'pin-next', 'pin-last', 'pin-start', 'pin-end']
     CONTEXT_MAX_TOKENS = 200000
+    def get_compaction_prompt(model_id: str) -> str:
+        return COMPACT_INSTRUCTIONS_SINGLE_PASS
 
 # Paths
 CLAUDE_DIR = Path.home() / '.claude'
@@ -978,8 +981,9 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
         # Get previous artefacts for delta mode
         prev_artefacts = self.previous_artefacts.get(session_id, 'None (first compaction)')
 
-        # Build single-pass prompt with previous artefacts
-        system_prompt = COMPACT_INSTRUCTIONS_SINGLE_PASS.replace('{previous_artefacts}', prev_artefacts)
+        # Build model-specific prompt with previous artefacts
+        base_prompt = get_compaction_prompt(model)
+        system_prompt = base_prompt.replace('{previous_artefacts}', prev_artefacts)
 
         # Transform request for OpenRouter (streaming, flattened to avoid role confusion)
         openrouter_request = self.claude_to_openai(compaction_body, model, max_tokens,

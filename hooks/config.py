@@ -318,3 +318,104 @@ COMPACTION_MAX_TOKENS = {
 # Preserve recent messages: exclude last N tokens from compaction, append verbatim
 # This keeps recent context exact (no summarization loss) while compacting older content
 COMPACTION_PRESERVE_TOKENS = 10000
+
+# Model-specific compaction prompts
+# Different models respond better to different prompt styles
+# Key: model ID prefix (matched with startswith), Value: prompt override
+# Use 'default' for models without specific prompts
+COMPACTION_PROMPTS = {
+    # Gemini models: direct, structured, benefits from explicit formatting
+    'google/gemini': """CONTEXT DISTILLATION FOR AGENT CONTINUITY
+
+You are distilling a coding session. Preserve execution-critical state, not prose.
+
+OUTPUT FORMAT (follow exactly):
+
+## ARTEFACTS
+REPO: /path — purpose
+FILES: /path/file.py — what it does
+COMMANDS:
+```
+exact command
+```
+ERRORS:
+```
+exact error
+```
+ENDPOINTS: url — purpose
+
+## DISTILLATION
+
+### Objective
+Primary: [current goal]
+
+### Tasks
+- [ ] task with context to execute
+- [ ] next task
+
+### User Context
+- Paths/URLs mentioned
+- Tools/preferences stated
+- Environment details
+
+### Changes Made
+- /path/file.py: what changed, why
+
+### Decisions
+- Choice made — reasoning
+
+### State
+- Done vs in-progress
+- Blockers
+
+### Timeline
+- [early] established
+- [mid] changes
+- [recent] focus
+
+Be thorough with artefacts. Be concise with prose.""",
+
+    # OpenAI models: handle longer context well, good at following structure
+    'openai/': """CONTEXT DISTILLATION
+
+Distill this coding session for agent continuity. This is execution-critical state preservation.
+
+PHASE 1 - ARTEFACTS (extract first):
+- Repository roots with purpose
+- Key files with their role
+- Exact commands (in code fences)
+- Exact errors (in code fences)
+- API endpoints/access points
+
+PHASE 2 - DISTILLATION:
+- Current objective (one sentence)
+- Open tasks with enough context to execute
+- User-provided context (paths, credentials references, preferences)
+- Code changes made (file: what + why)
+- Key decisions and reasoning
+- Current state (done vs in-progress, blockers)
+- Session timeline (early/mid/recent)
+
+Output artefacts first under ## ARTEFACTS, then distillation under ## DISTILLATION.""",
+
+    # Default: use the full COMPACT_INSTRUCTIONS_SINGLE_PASS
+    'default': None  # Falls back to COMPACT_INSTRUCTIONS_SINGLE_PASS
+}
+
+def get_compaction_prompt(model_id: str) -> str:
+    """Get the appropriate compaction prompt for a model.
+
+    Args:
+        model_id: OpenRouter model ID (e.g., 'google/gemini-3-flash-preview')
+
+    Returns:
+        Model-specific prompt or default COMPACT_INSTRUCTIONS_SINGLE_PASS
+    """
+    # Check for model-specific prompt
+    for prefix, prompt in COMPACTION_PROMPTS.items():
+        if prefix != 'default' and model_id.startswith(prefix):
+            if prompt:
+                return prompt
+
+    # Fall back to default
+    return COMPACT_INSTRUCTIONS_SINGLE_PASS

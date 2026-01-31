@@ -28,6 +28,38 @@ This system intercepts tool calls to manage context proactively:
 4. **External compaction** - Route summarization to cheaper external LLMs via OpenRouter
 5. **Purge on demand** - `/purge` command truncates old outputs
 
+## Two Modes of Operation
+
+### Basic Mode (no API key)
+
+Without an OpenRouter API key, CCM provides:
+- Hook interception (caching large outputs)
+- Subagent delegation
+- Manual `/purge` command
+- CLI patches for better context thresholds
+
+**Limitation:** Compaction still uses Claude's built-in summarization. Standard Claude Code context limits apply.
+
+### Full Mode (with OpenRouter API key) ⭐
+
+With an OpenRouter API key, CCM unlocks:
+- **External compaction** — Routes summarization to Gemini Flash (cheaper, higher output limits)
+- **Custom distillation prompts** — Model-optimized prompts for better summaries
+- **Project context extraction** — Guaranteed preservation of technical details
+- **Recovers ~22k tokens** — Claude's compaction buffer becomes usable
+
+**This is the recommended configuration for maximum benefit.**
+
+```bash
+# Set up OpenRouter (one-time)
+cat > ~/.claude/credentials.json << 'EOF'
+{"openrouter": {"api_key": "sk-or-v1-your-key-here"}}
+EOF
+chmod 600 ~/.claude/credentials.json
+```
+
+Get your API key at [openrouter.ai](https://openrouter.ai) (~$5 credit goes a long way).
+
 ## Compatibility
 
 ### Claude Code 2.1.9+
