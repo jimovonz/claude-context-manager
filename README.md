@@ -177,8 +177,24 @@ When Claude triggers compaction, the proxy:
 3. **Routes** to OpenRouter (Gemini Flash by default)
 4. **Extracts artefacts** (commands, paths, errors) for preservation
 5. **Generates distillation** with full context of artefacts
-6. **Appends artefacts** to guarantee preservation
-7. **Returns** summary in Claude SSE format
+6. **Extracts project context** (files, commands, hosts, endpoints) via regex
+7. **Appends gap-fill** — only project context items the LLM missed
+8. **Returns** summary in Claude SSE format
+
+### Project Context Extraction
+
+After the LLM generates its distillation, a local regex-based extractor scans the original messages for:
+
+- **Files accessed** — paths from Read/Edit/Write with operation counts
+- **Commands run** — significant bash commands (deduped)
+- **Remote hosts** — SSH and relay connections
+- **Endpoints/ports** — API URLs, localhost ports
+- **Git state** — branch, ahead/behind status
+- **Config files** — .env, credentials, settings files
+
+The extractor performs **fuzzy deduplication** against the LLM output, only appending items the LLM missed. The header shows coverage: `[gap-fill: 5/12 new (42%)]`
+
+This guarantees technical details survive compaction regardless of LLM summarization quality.
 
 ### Model Selection
 
@@ -239,6 +255,7 @@ tail -f ~/.claude/proxy.log
 
 Compaction debug files:
 - `~/.claude/last-compaction-request.json` - Full request to OpenRouter
+- `~/.claude/last-project-context.txt` - Extracted project context (gap-fill)
 - `~/.claude/last-artefacts.txt` - Extracted artefacts
 - `~/.claude/last-distillation.txt` - Final distillation output
 
@@ -390,11 +407,15 @@ CONTEXT_WARN_THRESHOLDS = [70, 80, 90]
 
 # External compaction
 EXTERNAL_COMPACTION_ENABLED = True
+PROJECT_CONTEXT_EXTRACTION_ENABLED = True  # Gap-fill extraction
 # API key loaded from ~/.claude/credentials.json or OPENROUTER_API_KEY env var
 
 # Thinking proxy
 THINKING_PROXY_ENABLED = True
 THINKING_PROXY_PORT = 8080
+
+# Metrics logging
+METRICS_ENABLED = True  # Logs to ~/.claude/hooks/metrics.log
 ```
 
 ## Files That Bypass Interception

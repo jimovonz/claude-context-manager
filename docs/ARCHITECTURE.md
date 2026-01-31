@@ -323,9 +323,11 @@ Routes compaction requests to external LLMs via OpenRouter.
 6. Send to OpenRouter with custom distillation prompt
 7. Extract artefacts from response
 8. Stream response in Claude SSE format
-9. Append preserved messages verbatim
-10. Mark session for no-thinking
-11. Write debug files
+9. Extract project context via regex (files, commands, hosts, endpoints)
+10. Fuzzy-dedupe against LLM output, append only gaps
+11. Append preserved messages verbatim
+12. Mark session for no-thinking
+13. Write debug files
 
 **Model selection:**
 - Compactions 1-5: `COMPACTION_MODELS['early']` (default: gemini-3-flash-preview)
@@ -342,9 +344,20 @@ Routes compaction requests to external LLMs via OpenRouter.
 
 **Artefact extraction:** Parses structured ARTEFACTS section from compaction output. Stored for next compaction's delta mode (only new artefacts added).
 
+**Project context extraction:** After LLM output, `lib/project_extractor.py` scans original messages for:
+- Files accessed (Read/Edit/Write with operation counts)
+- Commands run (deduped, non-trivial)
+- Remote hosts (SSH, relay)
+- Endpoints and ports
+- Git state (branch, ahead/behind)
+- Config files (.env, credentials)
+
+Fuzzy deduplication compares against LLM output — only items the LLM missed are appended. Header shows coverage: `[gap-fill: 5/12 new (42%)]`
+
 **Debug files:**
 - `~/.claude/last-compaction-request.json`
 - `~/.claude/last-artefacts.txt`
+- `~/.claude/last-project-context.txt`
 - `~/.claude/last-distillation.txt`
 
 ### 4.6 Daemon Management
@@ -738,7 +751,7 @@ All settings in `~/.claude/hooks/config.py`:
 | `GREP_THRESHOLD` | 8000 | Grep output caching threshold (bytes) |
 | `READ_THRESHOLD` | 25000 | File read caching threshold (bytes) |
 | `PATTERNS_EXPIRY_DAYS` | 30 | Learned pattern retention |
-| `METRICS_ENABLED` | False | Enable metrics logging |
+| `METRICS_ENABLED` | True | Enable metrics logging to ~/.claude/hooks/metrics.log |
 
 ### Context Monitor
 | Setting | Default | Description |
@@ -787,6 +800,7 @@ All settings in `~/.claude/hooks/config.py`:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `EXTERNAL_COMPACTION_ENABLED` | True | Route to external LLM |
+| `PROJECT_CONTEXT_EXTRACTION_ENABLED` | True | Gap-fill extraction after LLM |
 | `OPENROUTER_API_KEY` | (from credentials) | API key |
 | `OPENROUTER_API_BASE` | openrouter.ai/api/v1 | API endpoint |
 | `COMPACTION_MODELS` | {early/late: gemini-3-flash} | Model selection |

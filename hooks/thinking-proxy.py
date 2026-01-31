@@ -46,6 +46,11 @@ try:
         PRESERVED_SKILLS,
         CONTEXT_MAX_TOKENS,
     )
+    # Optional: project context extraction
+    try:
+        from config import PROJECT_CONTEXT_EXTRACTION_ENABLED
+    except ImportError:
+        PROJECT_CONTEXT_EXTRACTION_ENABLED = True  # Default enabled
 except ImportError:
     THINKING_PROXY_PORT = 8080
     THINKING_PROXY_DEBUG_LOG = False
@@ -71,6 +76,15 @@ STATE_DIR = CLAUDE_DIR / 'proxy-state' / 'no-thinking'
 
 # API endpoint
 ANTHROPIC_API_URL = 'https://api.anthropic.com'
+
+# Project context extraction
+try:
+    from lib.project_extractor import extract_project_context
+    PROJECT_EXTRACTOR_AVAILABLE = True
+except ImportError:
+    PROJECT_EXTRACTOR_AVAILABLE = False
+    def extract_project_context(messages):
+        return ""
 
 # Abbreviated system prompt (replaces verbose ~13KB system prompt)
 # Set to None to disable replacement
@@ -1051,6 +1065,26 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
                         artefacts_file = CLAUDE_DIR / 'last-artefacts.txt'
                         artefacts_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{extracted_artefacts}")
                         # Note: artefacts already in LLM output (single-pass), no need to append again
+
+                    # Extract and append project context (gap-fill mode: only items LLM missed)
+                    if PROJECT_EXTRACTOR_AVAILABLE and PROJECT_CONTEXT_EXTRACTION_ENABLED:
+                        try:
+                            # Pass LLM output for fuzzy deduplication
+                            project_context_section = extract_project_context(
+                                original_messages, llm_output=full_output
+                            )
+                            if project_context_section:
+                                total_chars[0] += len(project_context_section)
+                                collected_content.append(project_context_section)
+                                yield self._content_block_delta_event(project_context_section)
+                                logger.info(f"Appended project context gap-fill ({len(project_context_section)} chars)")
+                                # Save for debugging
+                                ctx_file = CLAUDE_DIR / 'last-project-context.txt'
+                                ctx_file.write_text(f"Session: {session_id}\nCompaction: {count}\n\n{project_context_section}")
+                            else:
+                                logger.info("Project context: LLM covered all items (no gap-fill needed)")
+                        except Exception as e:
+                            logger.warning(f"Project context extraction failed: {e}")
 
                     # Append preserved recent messages (verbatim, no summarization)
                     if preserved_messages:

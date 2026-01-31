@@ -63,9 +63,16 @@ The system uses a single-pass approach that combines artefact extraction and dis
    - Proxy parses the LLM's output to find the ARTEFACTS section
    - Stores artefacts for next compaction's delta mode
 
-3. **Programmatic append**:
-   - After LLM response, proxy appends the extracted artefacts
-   - Guarantees artefact preservation regardless of LLM verbosity
+3. **Project context extraction** (local, no LLM):
+   - Scans original messages for files, commands, hosts, endpoints, git state
+   - Fuzzy-dedupes against LLM output to find gaps
+   - Only items the LLM missed are appended
+   - Header shows coverage: `[gap-fill: 5/12 new (42%)]`
+
+4. **Programmatic append**:
+   - Project context (gap-fill only) appended after LLM output
+   - Preserved messages appended verbatim
+   - Guarantees technical detail preservation regardless of LLM quality
 
 ### Benefits
 
@@ -73,6 +80,7 @@ The system uses a single-pass approach that combines artefact extraction and dis
 - **Artefacts in context** when LLM writes distillation
 - **Guaranteed preservation** via append (never lost)
 - **Delta mode** for subsequent compactions (only output changes)
+- **Gap-fill safety net** catches technical details LLM missed
 
 ## Compaction Detection
 

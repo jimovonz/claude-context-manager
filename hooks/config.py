@@ -23,7 +23,7 @@ READ_THRESHOLD = 25000  # ~6k tokens
 PATTERNS_EXPIRY_DAYS = 30
 
 # Metrics logging (set to True to enable)
-METRICS_ENABLED = False
+METRICS_ENABLED = True
 
 # =============================================================================
 # Context Monitor Settings
@@ -267,6 +267,11 @@ import json
 
 # Enable external compaction routing (routes /compact to external LLM)
 EXTERNAL_COMPACTION_ENABLED = True
+
+# Enable project context extraction during compaction
+# Extracts files accessed, commands run, endpoints, git state, etc. via regex
+# Appended after LLM distillation for guaranteed preservation
+PROJECT_CONTEXT_EXTRACTION_ENABLED = True
 
 # OpenRouter API key (from credentials file or environment)
 def _load_openrouter_key():
