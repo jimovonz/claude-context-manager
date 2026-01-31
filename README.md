@@ -83,20 +83,25 @@ Works without patches. Original target version.
 
 ## Quick Start
 
+**One-line install:**
 ```bash
-# Clone and install
+curl -fsSL https://raw.githubusercontent.com/jimovonz/claude-context-manager/main/install.sh | bash
+```
+
+**Or manual install:**
+```bash
 git clone https://github.com/jimovonz/claude-context-manager.git
 cd claude-context-manager
-python3 install.py
-
-# Install dependencies
 pip install aiohttp tiktoken
+python3 install.py
+```
 
-# Launch Claude with CCM
+Then launch Claude with CCM:
+```bash
 c
 ```
 
-The installer creates a symlink at `~/.local/bin/c`. If not in PATH, add to `~/.bashrc` or `~/.zshrc`:
+If `c` is not found, add to `~/.bashrc` or `~/.zshrc`:
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
 ```
