@@ -258,6 +258,26 @@ THINKING_PROXY_DEBUG_LOG = False
 # These are extracted from the system prompt and appended to the abbreviated version
 PRESERVED_SKILLS = ['relay', 'ccm']
 
+# Abbreviate system prompt (replaces Claude's ~13KB default with ~2.9KB version)
+# Saves ~10k tokens per request, freeing context for actual work
+ABBREVIATE_SYSTEM_PROMPT = True
+
+# Abbreviate tool descriptions (replaces verbose tool docs with minimal signatures)
+# Can save ~40KB per request but may affect tool usage quality
+ABBREVIATE_TOOLS = True
+
+# Custom system prompt file (overrides built-in abbreviated prompt)
+# Create this file to use your own system prompt
+_SYSTEM_PROMPT_FILE = Path.home() / '.claude' / 'system-prompt.txt'
+
+def _load_system_prompt():
+    """Load custom system prompt from file if exists."""
+    if _SYSTEM_PROMPT_FILE.exists():
+        return _SYSTEM_PROMPT_FILE.read_text().strip()
+    return None
+
+CUSTOM_SYSTEM_PROMPT = _load_system_prompt()
+
 # =============================================================================
 # External Compaction Settings
 # =============================================================================

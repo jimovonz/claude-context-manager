@@ -262,6 +262,33 @@ The thinking proxy manages Claude's thinking blocks and routes compaction reques
 - **Session tracking** - Tracks sessions for thinking block management
 - **Compaction routing** - Routes `/compact` to external LLMs
 - **No-thinking mode** - Strips thinking after purge to prevent API errors
+- **System prompt abbreviation** - Replaces ~13KB default prompt with ~2.9KB version
+- **Tool abbreviation** - Reduces tool descriptions by ~40KB
+
+### System Prompt Customization
+
+The proxy replaces Claude's verbose default system prompt (~13KB) with an abbreviated version (~2.9KB), saving ~10k tokens per request.
+
+**Configuration:**
+```python
+# ~/.claude/hooks/config.py
+ABBREVIATE_SYSTEM_PROMPT = True   # Enable prompt abbreviation
+ABBREVIATE_TOOLS = True           # Enable tool description abbreviation
+```
+
+**Custom system prompt:**
+
+Create `~/.claude/system-prompt.txt` to use your own prompt:
+
+```bash
+cat > ~/.claude/system-prompt.txt << 'EOF'
+You are a helpful coding assistant. Be concise and direct.
+
+# Your custom instructions here...
+EOF
+```
+
+The custom prompt will be used instead of the built-in abbreviated version. CCM will still append preserved skills (relay, ccm, etc.) from the original prompt.
 
 ### Starting the Proxy
 
@@ -450,6 +477,9 @@ PROJECT_CONTEXT_EXTRACTION_ENABLED = True  # Gap-fill extraction
 # Thinking proxy
 THINKING_PROXY_ENABLED = True
 THINKING_PROXY_PORT = 8080
+ABBREVIATE_SYSTEM_PROMPT = True  # Replace ~13KB prompt with ~2.9KB
+ABBREVIATE_TOOLS = True          # Reduce tool descriptions
+# Custom prompt: create ~/.claude/system-prompt.txt
 
 # Metrics logging
 METRICS_ENABLED = True  # Logs to ~/.claude/hooks/metrics.log

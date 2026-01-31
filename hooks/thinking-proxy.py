@@ -47,11 +47,17 @@ try:
         CONTEXT_MAX_TOKENS,
         get_compaction_prompt,
     )
-    # Optional: project context extraction
+    # Optional config imports
     try:
         from config import PROJECT_CONTEXT_EXTRACTION_ENABLED
     except ImportError:
-        PROJECT_CONTEXT_EXTRACTION_ENABLED = True  # Default enabled
+        PROJECT_CONTEXT_EXTRACTION_ENABLED = True
+    try:
+        from config import ABBREVIATE_SYSTEM_PROMPT, ABBREVIATE_TOOLS, CUSTOM_SYSTEM_PROMPT
+    except ImportError:
+        ABBREVIATE_SYSTEM_PROMPT = True
+        ABBREVIATE_TOOLS = True
+        CUSTOM_SYSTEM_PROMPT = None
 except ImportError:
     THINKING_PROXY_PORT = 8080
     THINKING_PROXY_DEBUG_LOG = False
@@ -67,6 +73,10 @@ Be concise. Prioritize actionable context over history."""
     COMPACT_INSTRUCTIONS_SINGLE_PASS = COMPACT_INSTRUCTIONS
     PRESERVED_SKILLS = ['relay', 'ccm', 'pin-next', 'pin-last', 'pin-start', 'pin-end']
     CONTEXT_MAX_TOKENS = 200000
+    ABBREVIATE_SYSTEM_PROMPT = True
+    ABBREVIATE_TOOLS = True
+    CUSTOM_SYSTEM_PROMPT = None
+    PROJECT_CONTEXT_EXTRACTION_ENABLED = True
     def get_compaction_prompt(model_id: str) -> str:
         return COMPACT_INSTRUCTIONS_SINGLE_PASS
 
@@ -159,6 +169,10 @@ ABBREVIATED_SYSTEM_PROMPT = """You are an interactive CLI assistant that helps u
 /pin-start         Emit in response: ccm:pin start level=soft
 /pin-end           Emit in response: ccm:pin end
 """
+
+# Use custom system prompt if provided, otherwise use built-in abbreviated
+if CUSTOM_SYSTEM_PROMPT:
+    ABBREVIATED_SYSTEM_PROMPT = CUSTOM_SYSTEM_PROMPT
 
 # Abbreviated tool descriptions - Level 2: Params only
 # Set to None to preserve original (for tools with dynamic content)
@@ -1422,8 +1436,10 @@ def run_proxy(port: int, debug: bool):
 
             # Abbreviate system prompt and tool descriptions to save tokens
             if body:
-                body = self._abbreviate_system_prompt(body)
-                body = self._abbreviate_tools(body)
+                if ABBREVIATE_SYSTEM_PROMPT:
+                    body = self._abbreviate_system_prompt(body)
+                if ABBREVIATE_TOOLS:
+                    body = self._abbreviate_tools(body)
 
             # Dynamic thinking budget: reduce max_tokens as context fills
             if body and session_id:
