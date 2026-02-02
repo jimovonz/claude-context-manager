@@ -36,16 +36,20 @@ class CoverageStats:
     ports_new: int = 0
     config_total: int = 0
     config_new: int = 0
+    errors_total: int = 0
+    errors_new: int = 0
 
     @property
     def total_items(self) -> int:
         return (self.files_total + self.commands_total + self.hosts_total +
-                self.endpoints_total + self.ports_total + self.config_total)
+                self.endpoints_total + self.ports_total + self.config_total +
+                self.errors_total)
 
     @property
     def new_items(self) -> int:
         return (self.files_new + self.commands_new + self.hosts_new +
-                self.endpoints_new + self.ports_new + self.config_new)
+                self.endpoints_new + self.ports_new + self.config_new +
+                self.errors_new)
 
     @property
     def coverage_pct(self) -> float:
@@ -112,6 +116,10 @@ class ProjectContext:
     env_vars: set[str] = field(default_factory=set)  # var names only, not values
     config_files: set[str] = field(default_factory=set)
 
+    # Error tracking (Tier 1 - high value for continuity)
+    errors: list[str] = field(default_factory=list)  # Error messages/stack traces
+    failed_commands: list[str] = field(default_factory=list)  # Commands that failed
+
 
 class ProjectSettingsExtractor:
     """Extract project metadata from conversation messages via regex.
@@ -145,6 +153,38 @@ class ProjectSettingsExtractor:
         'go.mod': 'go',
         'Gemfile': 'ruby',
     }
+
+    # Error patterns (for extracting failures/issues)
+    ERROR_PATTERNS = [
+        # Python errors
+        r'(Traceback \(most recent call last\):.*?(?:Error|Exception): .+?)(?=\n\n|\Z)',
+        r'(\w+Error: .{10,200})',
+        r'(\w+Exception: .{10,200})',
+        # Node/JS errors
+        r'(TypeError: .{10,150})',
+        r'(ReferenceError: .{10,150})',
+        r'(SyntaxError: .{10,150})',
+        # Build/compile errors
+        r'(error\[\w+\]: .{10,150})',  # Rust errors
+        r'(error: .{10,150})',  # Generic errors
+        r'(FAILED: .{10,150})',
+        r'(BUILD FAILED.{0,100})',
+        # Test failures
+        r'(FAIL .{10,150})',
+        r'(AssertionError: .{10,150})',
+        r'(\d+ (?:tests? )?failed)',
+        # Command failures
+        r'(command not found: \S+)',
+        r'(No such file or directory.{0,50})',
+        r'(Permission denied.{0,50})',
+        # Connection errors
+        r'(Connection refused.{0,50})',
+        r'(Connection timed out.{0,50})',
+        r'(ECONNREFUSED.{0,50})',
+    ]
+
+    # Patterns indicating command failure (check exit codes)
+    EXIT_CODE_PATTERN = r'Exit code[:\s]+(\d+)'
 
     def __init__(self):
         self.context = ProjectContext()
@@ -232,6 +272,9 @@ class ProjectSettingsExtractor:
 
     def _extract_from_tool_output(self, text: str) -> None:
         """Extract patterns from tool output text."""
+        # Tier 1: Errors (high value for continuity)
+        self._extract_errors(text)
+
         # Tier 2: Git state
         self._extract_git_state(text)
 
@@ -349,6 +392,38 @@ class ProjectSettingsExtractor:
             path = str(Path(path).expanduser())
         if path not in self.context.working_dirs:
             self.context.working_dirs.append(path)
+
+    def _extract_errors(self, text: str) -> None:
+        """Extract error messages and stack traces from tool output."""
+        # Check for non-zero exit codes
+        exit_match = re.search(self.EXIT_CODE_PATTERN, text, re.IGNORECASE)
+        if exit_match:
+            exit_code = int(exit_match.group(1))
+            if exit_code != 0:
+                # Try to find the command that failed
+                cmd_match = re.search(r'(?:command|cmd)[:\s]+(.{10,80})', text, re.IGNORECASE)
+                if cmd_match:
+                    failed_cmd = cmd_match.group(1).strip()
+                    if failed_cmd not in self.context.failed_commands:
+                        self.context.failed_commands.append(f"{failed_cmd} (exit {exit_code})")
+
+        # Extract error patterns
+        seen_errors = set()  # Dedupe within this text block
+        for pattern in self.ERROR_PATTERNS:
+            try:
+                for match in re.finditer(pattern, text, re.MULTILINE | re.DOTALL | re.IGNORECASE):
+                    error_text = match.group(1) if match.lastindex else match.group(0)
+                    # Clean up and truncate
+                    error_text = error_text.strip()
+                    if len(error_text) > 200:
+                        error_text = error_text[:197] + "..."
+                    # Dedupe
+                    error_key = error_text[:50].lower()
+                    if error_key not in seen_errors and len(self.context.errors) < 20:
+                        seen_errors.add(error_key)
+                        self.context.errors.append(error_text)
+            except re.error:
+                continue  # Skip invalid patterns
 
     def _extract_git_state(self, text: str) -> None:
         """Extract git state from command outputs."""
@@ -551,6 +626,17 @@ class ProjectSettingsExtractor:
                 deduped.config_files.add(cf)
                 stats.config_new += 1
 
+        # Errors: keep if error message not found (high value - always include)
+        stats.errors_total = len(ctx.errors) + len(ctx.failed_commands)
+        for error in ctx.errors:
+            if not self._error_in_text(error, llm_lower):
+                deduped.errors.append(error)
+                stats.errors_new += 1
+        for failed in ctx.failed_commands:
+            if not self._error_in_text(failed, llm_lower):
+                deduped.failed_commands.append(failed)
+                stats.errors_new += 1
+
         # Always include these (low redundancy risk, high value)
         deduped.project_roots = ctx.project_roots
         deduped.working_dirs = ctx.working_dirs
@@ -682,6 +768,28 @@ class ProjectSettingsExtractor:
                     return True
         return False
 
+    def _error_in_text(self, error: str, text: str) -> bool:
+        """Check if an error message appears in text (fuzzy match)."""
+        error_lower = error.lower()
+
+        # Direct match
+        if error_lower in text:
+            return True
+
+        # Check key parts of the error (first 50 chars)
+        key_part = error_lower[:50]
+        if key_part in text:
+            return True
+
+        # Check error type (e.g., "TypeError", "ConnectionError")
+        error_type_match = re.match(r'(\w+Error|\w+Exception)', error, re.IGNORECASE)
+        if error_type_match:
+            error_type = error_type_match.group(1).lower()
+            if error_type in text:
+                return True
+
+        return False
+
     def format(self, context: Optional[ProjectContext] = None, stats: Optional[CoverageStats] = None) -> str:
         """Format extracted context as appendable section.
 
@@ -698,7 +806,7 @@ class ProjectSettingsExtractor:
         has_content = (
             ctx.files or ctx.commands or ctx.ssh_hosts or ctx.relay_hosts or
             ctx.endpoints or ctx.ports or ctx.config_files or ctx.project_roots or
-            ctx.git_branch
+            ctx.git_branch or ctx.errors or ctx.failed_commands
         )
         if not has_content:
             return ""
@@ -753,6 +861,23 @@ class ProjectSettingsExtractor:
                 lines.append(f"  {display_cmd}")
             if len(ctx.commands) > 20:
                 lines.append(f"  ... and {len(ctx.commands) - 20} more")
+
+        # Errors and failures (high value for continuity)
+        if ctx.errors or ctx.failed_commands:
+            lines.append("")
+            lines.append("ERRORS/ISSUES:")
+            for failed in ctx.failed_commands[:10]:
+                lines.append(f"  ✗ {failed}")
+            for error in ctx.errors[:10]:
+                # Format multiline errors compactly
+                error_display = error.replace('\n', ' ↩ ')
+                if len(error_display) > 120:
+                    error_display = error_display[:117] + "..."
+                lines.append(f"  • {error_display}")
+            total_errors = len(ctx.errors) + len(ctx.failed_commands)
+            shown = min(10, len(ctx.failed_commands)) + min(10, len(ctx.errors))
+            if total_errors > shown:
+                lines.append(f"  ... and {total_errors - shown} more")
 
         # SSH/Relay hosts
         all_hosts = ctx.ssh_hosts | ctx.relay_hosts
