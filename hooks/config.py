@@ -349,6 +349,14 @@ COMPACTION_MAX_TOKENS = {
 # This keeps recent context exact (no summarization loss) while compacting older content
 COMPACTION_PRESERVE_TOKENS = 10000
 
+# Minimum output tokens for compaction; if below this, request expansion (two-pass)
+# Second pass reuses cached context (cheap with Gemini's context caching)
+COMPACTION_MIN_OUTPUT_TOKENS = 6000
+
+# Enable context caching for OpenRouter/Gemini compaction requests
+# When enabled, large conversation is cached; expansion requests reuse cached context
+COMPACTION_CACHE_ENABLED = True
+
 # Model-specific compaction prompts
 # Different models respond better to different prompt styles
 # Key: model ID prefix (matched with startswith), Value: prompt override

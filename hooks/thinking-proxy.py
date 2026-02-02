@@ -53,6 +53,14 @@ try:
     except ImportError:
         PROJECT_CONTEXT_EXTRACTION_ENABLED = True
     try:
+        from config import COMPACTION_MIN_OUTPUT_TOKENS
+    except ImportError:
+        COMPACTION_MIN_OUTPUT_TOKENS = 6000
+    try:
+        from config import COMPACTION_CACHE_ENABLED
+    except ImportError:
+        COMPACTION_CACHE_ENABLED = True
+    try:
         from config import ABBREVIATE_SYSTEM_PROMPT, ABBREVIATE_TOOLS, CUSTOM_SYSTEM_PROMPT
     except ImportError:
         ABBREVIATE_SYSTEM_PROMPT = True
@@ -67,6 +75,8 @@ except ImportError:
     COMPACTION_MODELS = {'early': 'google/gemini-2.0-flash-lite-001', 'late': 'google/gemini-2.0-flash-001'}
     COMPACTION_MAX_TOKENS = {1: 20000, 2: 36000, 3: 52000, 4: 68000, 5: 84000, 'default': 100000}
     COMPACTION_PRESERVE_TOKENS = 10000
+    COMPACTION_MIN_OUTPUT_TOKENS = 6000  # Minimum output; if below, request expansion (uses cached context)
+    COMPACTION_CACHE_ENABLED = True  # Enable cache_control for OpenRouter/Gemini
     COMPACT_INSTRUCTIONS = """Summarize this conversation for context continuity.
 Preserve: current task, key decisions, file paths, pending actions, errors being investigated.
 Be concise. Prioritize actionable context over history."""
@@ -558,12 +568,21 @@ class ExternalCompactionHandler:
         self.previous_artefacts: dict[str, str] = {}  # session_id -> artefacts from last Pass 1
 
     def is_compaction_request(self, body: dict) -> bool:
-        """Detect compaction by Claude Code's injected system prompt.
+        """Detect compaction by Claude Code's injected prompts.
 
-        Claude Code adds a system block containing "summarizing conversations"
-        when triggering compaction.
+        Claude Code adds "summarizing conversations" either in:
+        - System blocks (older versions)
+        - First user message (2.1.27+)
         """
+        # First, check for known non-compaction patterns (filepath extraction, etc.)
         system = body.get('system', [])
+        for block in system:
+            text = block.get('text', '') if isinstance(block, dict) else block if isinstance(block, str) else ''
+            # Filepath extraction requests are NOT compaction
+            if 'extract any file paths' in text.lower():
+                return False
+
+        # Check system blocks for compaction pattern
         for block in system:
             if isinstance(block, dict):
                 text = block.get('text', '')
@@ -572,6 +591,29 @@ class ExternalCompactionHandler:
             elif isinstance(block, str):
                 if 'summarizing conversations' in block.lower():
                     return True
+
+        # Check first message (Claude Code 2.1.27+ format)
+        # But skip if it contains tool_result blocks (indicates regular request, not compaction)
+        messages = body.get('messages', [])
+        if messages:
+            first_msg = messages[0]
+            content = first_msg.get('content', '')
+            if isinstance(content, str) and 'summarizing conversations' in content.lower():
+                return True
+            elif isinstance(content, list):
+                # Skip if any block is a tool_result (not a compaction prompt)
+                has_tool_result = any(
+                    isinstance(block, dict) and block.get('type') == 'tool_result'
+                    for block in content
+                )
+                if has_tool_result:
+                    return False
+                for block in content:
+                    if isinstance(block, dict):
+                        text = block.get('text', '')
+                        if 'summarizing conversations' in text.lower():
+                            return True
+
         return False
 
     def strip_thinking_from_messages(self, messages: list) -> list:
@@ -731,7 +773,8 @@ class ExternalCompactionHandler:
 
     def claude_to_openai(self, body: dict, model: str, max_tokens: int,
                           system_prompt: str = None, stream: bool = True,
-                          artefacts: str = None, flatten_conversation: bool = False) -> dict:
+                          artefacts: str = None, flatten_conversation: bool = False,
+                          enable_cache: bool = False) -> dict:
         """Transform Claude request to OpenAI/OpenRouter format.
 
         Optimizations for compaction:
@@ -739,6 +782,7 @@ class ExternalCompactionHandler:
         - Strip metadata (cache_control, timestamps, UUIDs)
         - Tool results left as-is (already summarized by CCM hooks)
         - Truncate old messages if request exceeds OpenRouter's 1MB limit
+        - Optional cache_control for OpenRouter/Gemini context caching
         """
         messages = self.strip_thinking_from_messages(body.get('messages', []))
 
@@ -826,7 +870,20 @@ Extract and distill this into the OUTPUT STRUCTURE specified in your instruction
 
 Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."""
 
-            openai_messages.append({'role': 'user', 'content': user_content})
+            # Add cache_control for OpenRouter/Gemini if enabled
+            if enable_cache:
+                openai_messages.append({
+                    'role': 'user',
+                    'content': [
+                        {
+                            'type': 'text',
+                            'text': user_content,
+                            'cache_control': {'type': 'ephemeral'}
+                        }
+                    ]
+                })
+            else:
+                openai_messages.append({'role': 'user', 'content': user_content})
         else:
             # Standard mode: Convert to role/content format
             for msg in messages:
@@ -1000,9 +1057,11 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
         system_prompt = base_prompt.replace('{previous_artefacts}', prev_artefacts)
 
         # Transform request for OpenRouter (streaming, flattened to avoid role confusion)
+        # Enable caching so second pass (if needed) reuses cached context
         openrouter_request = self.claude_to_openai(compaction_body, model, max_tokens,
                                                     system_prompt=system_prompt, stream=True,
-                                                    flatten_conversation=True, artefacts="(single-pass mode)")
+                                                    flatten_conversation=True, artefacts="(single-pass mode)",
+                                                    enable_cache=COMPACTION_CACHE_ENABLED)
 
         logger.debug(f"OpenRouter request: {json.dumps(openrouter_request, indent=2)[:2000]}...")
 
@@ -1069,6 +1128,82 @@ Now generate the distillation. Remember: MINIMUM 10,000 tokens output required."
                                     pass
 
                     logger.info(f"Single-pass complete: {total_chars[0]} chars output")
+
+                    # Check if output is too short - request expansion (uses cached context)
+                    est_tokens = total_chars[0] // 4
+                    if COMPACTION_CACHE_ENABLED and est_tokens < COMPACTION_MIN_OUTPUT_TOKENS:
+                        logger.info(f"Output too short ({est_tokens} tokens < {COMPACTION_MIN_OUTPUT_TOKENS}), requesting expansion...")
+
+                        # Build expansion request - conversation is cached, only send expansion prompt
+                        expansion_prompt = f"""Your previous distillation was {est_tokens} tokens, which is too sparse.
+
+The minimum requirement is {COMPACTION_MIN_OUTPUT_TOKENS} tokens. You need approximately {COMPACTION_MIN_OUTPUT_TOKENS - est_tokens} more tokens.
+
+Please EXPAND your distillation with:
+1. More detail in each section
+2. Additional code snippets and command examples (verbatim)
+3. More specific file paths and line numbers
+4. Expanded reasoning for key decisions
+5. More context about the current state and next steps
+
+Continue from where you left off. Do not repeat the headers, just add more content to each section."""
+
+                        expansion_request = {
+                            'model': model,
+                            'messages': openrouter_request['messages'] + [
+                                {'role': 'assistant', 'content': ''.join(collected_content)},
+                                {'role': 'user', 'content': expansion_prompt}
+                            ],
+                            'max_tokens': max_tokens // 2,  # Half of original budget for expansion
+                            'stream': True
+                        }
+
+                        try:
+                            async with aiohttp_session.post(
+                                f'{self.api_base}/chat/completions',
+                                headers={
+                                    'Authorization': f'Bearer {self.api_key}',
+                                    'HTTP-Referer': 'https://github.com/anthropics/claude-code',
+                                    'X-Title': 'Claude Code CCM Expansion',
+                                    'Content-Type': 'application/json',
+                                },
+                                json=expansion_request
+                            ) as expansion_response:
+                                if expansion_response.status == 200:
+                                    yield self._content_block_delta_event("\n\n--- EXPANDED CONTENT ---\n\n")
+                                    collected_content.append("\n\n--- EXPANDED CONTENT ---\n\n")
+
+                                    exp_buffer = b''
+                                    async for chunk in expansion_response.content.iter_any():
+                                        exp_buffer += chunk
+                                        while b'\n' in exp_buffer:
+                                            line, exp_buffer = exp_buffer.split(b'\n', 1)
+                                            line = line.strip()
+                                            if not line:
+                                                continue
+                                            if line.startswith(b'data: '):
+                                                data_str = line[6:].decode('utf-8')
+                                                if data_str == '[DONE]':
+                                                    break
+                                                try:
+                                                    data = json.loads(data_str)
+                                                    choices = data.get('choices', [])
+                                                    if choices:
+                                                        delta = choices[0].get('delta', {})
+                                                        content = delta.get('content', '')
+                                                        if content:
+                                                            total_chars[0] += len(content)
+                                                            collected_content.append(content)
+                                                            yield self._content_block_delta_event(content)
+                                                except json.JSONDecodeError:
+                                                    pass
+
+                                    logger.info(f"Expansion complete, total now: {total_chars[0]} chars")
+                                else:
+                                    error_text = await expansion_response.text()
+                                    logger.warning(f"Expansion request failed: {expansion_response.status} - {error_text[:200]}")
+                        except Exception as e:
+                            logger.warning(f"Expansion request error: {e}")
 
                     # Extract artefacts from output for storage
                     full_output = ''.join(collected_content)
@@ -1471,6 +1606,9 @@ def run_proxy(port: int, debug: bool):
                     body_json = json.loads(body)
                     if self.compaction_handler.is_compaction_request(body_json):
                         logger.info(f"Detected compaction request for session {session_id}")
+                        # Dump original request ONLY when compaction detected
+                        with open(CLAUDE_DIR / 'original-compaction-request.json', 'w') as f:
+                            json.dump(body_json, f, indent=2)
 
                         # Route to external model
                         stream_gen, mark_no_thinking = await self.compaction_handler.handle_compaction(
