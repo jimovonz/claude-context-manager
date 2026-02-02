@@ -444,9 +444,8 @@ def build_ccm_stub(
 
     source_line = ' '.join(source_parts) if source_parts else 'unknown'
 
-    # Build stub - minimal fields only
+    # Build stub - minimal fields only (key shown in Retrieve line)
     stub_lines = ['[CCM_CACHED]']
-    stub_lines.append(f'key: {key}')
     # Estimate tokens (~4 chars per token for typical text)
     est_tokens = bytes_uncompressed // 4
     if est_tokens >= 1000:

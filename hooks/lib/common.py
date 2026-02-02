@@ -254,8 +254,9 @@ def build_ccm_cache_response(
     original: str
 ) -> str:
     """Build cache response message with CCM stub format."""
-    if key.startswith('sha256:'):
-        # CCM format
+    if key.startswith('sha256:') or key.startswith('b2s:'):
+        # CCM format - strip prefix for display
+        hex_key = key[7:] if key.startswith('sha256:') else key[4:]
         try:
             from lib.ccm_cache import build_ccm_stub, get_metadata
 
@@ -265,7 +266,7 @@ def build_ccm_cache_response(
             stub = build_ccm_stub(key, size, lines, exit_code, pin_level)
             # Compact retrieval line with filter hint
             return f"""{stub}
-Retrieve: ccm-get.py {key} [--grep PATTERN] [--head N] [--lines N-M]"""
+Retrieve: ccm-get.py {hex_key} [--grep PATTERN] [--head N] [--lines N-M]"""
         except ImportError:
             pass
 
@@ -358,13 +359,20 @@ def json_pass() -> None:
 
 def build_cache_response(file_uuid: str, lines: int, size: int, exit_code: int, original: str) -> str:
     """Build cache response message (minimal)."""
+    # Strip prefix if present for cleaner display
+    if file_uuid.startswith('sha256:'):
+        hex_key = file_uuid[7:]
+    elif file_uuid.startswith('b2s:'):
+        hex_key = file_uuid[4:]
+    else:
+        hex_key = file_uuid
     return f"""Cached ({lines} lines, {size} bytes, exit {exit_code}).
-File: ~/.claude/cache/{file_uuid}
+Key: {hex_key}
 Original: {original}
 
 Options: Task agent (summarize or full content), or paginate with offset/limit.
 
-YOU MUST SPAWN A SUBAGENT TO RETRIEVE THIS CONTENT USING: ~/.claude/hooks/ccm-get.py ~/.claude/cache/{file_uuid}"""
+Retrieve: ccm-get.py {hex_key} [--grep PATTERN] [--head N] [--lines N-M]"""
 
 
 def log_metric(tool: str, action: str, size: int = 0) -> None:

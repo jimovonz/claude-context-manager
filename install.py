@@ -52,6 +52,10 @@ HOOK_CONFIG = {
             {
                 "matcher": "Read",
                 "hooks": [{"type": "command", "command": "~/.claude/hooks/intercept-read.py"}]
+            },
+            {
+                "matcher": "WebFetch",
+                "hooks": [{"type": "command", "command": "~/.claude/hooks/intercept-webfetch.py"}]
             }
         ],
         "PostToolUse": [

@@ -32,10 +32,11 @@ from lib.ccm_cache import (
 RETRIEVAL_LOG = Path(__file__).parent / 'retrieval.log'
 
 
-def log_retrieval(key: str, args) -> None:
+def log_retrieval(key: str, args, returned_bytes: int = None) -> None:
     """Log retrieval details for analysis."""
     try:
         meta = get_metadata(key)
+        source_size = meta.get('bytes_uncompressed') if meta else None
         entry = {
             'timestamp': datetime.now().isoformat(),
             'key': key[:20] + '...',
@@ -49,7 +50,9 @@ def log_retrieval(key: str, args) -> None:
             'reason': args.reason if args.reason else None,
             'is_full_retrieval': args.grep in ('.', '.*', '^', '.*$', '^.*$') if args.grep else False,
             'source_tool': meta.get('source', {}).get('tool_name') if meta else None,
-            'source_size': meta.get('bytes_uncompressed') if meta else None,
+            'source_size': source_size,
+            'returned_bytes': returned_bytes,
+            'savings_pct': round((1 - returned_bytes / source_size) * 100, 1) if source_size and returned_bytes else None,
         }
         # Remove None values
         entry['filter'] = {k: v for k, v in entry['filter'].items() if v is not None}
@@ -142,6 +145,22 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
 
     # Resolve key
     key = args.key
+
+    # Handle if user passed a path instead of just the key
+    # e.g., ~/.claude/cache/b2s:abc123 -> b2s:abc123
+    # or /home/user/.claude/cache/ccm/blobs/abc123.gz -> b2s:abc123
+    if key and '/' in key:
+        import os
+        basename = os.path.basename(key)
+        # Strip extension if it looks like a blob file
+        if basename.endswith(('.gz', '.zst', '.txt')):
+            basename = os.path.splitext(basename)[0]
+        # If basename looks like a key (hex or prefixed), use it
+        if basename.startswith(('b2s:', 'sha256:')) or all(c in '0123456789abcdef' for c in basename):
+            if not basename.startswith(('b2s:', 'sha256:')):
+                basename = f'b2s:{basename}'  # Assume b2s for raw hex
+            key = basename
+
     if args.last:
         key = get_last_key()
         if not key:
@@ -218,9 +237,6 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
         print("  --reason \"editing file, need full context for changes\"", file=sys.stderr)
         sys.exit(1)
 
-    # Log retrieval for analysis
-    log_retrieval(key, args)
-
     # Get content
     content = retrieve_content(key)
     if content is None:
@@ -291,10 +307,13 @@ Full retrieval (--grep ".") requires --reason explaining why filtering isn't pos
         filtered = True
 
     # Output
+    output = '\n'.join(lines)
+
+    # Log retrieval for analysis (after filtering to capture returned size)
+    log_retrieval(key, args, returned_bytes=len(output.encode('utf-8')))
+
     if filtered:
         print(f"[Filtered: {len(lines)} of {original_count} lines]", file=sys.stderr)
-
-    output = '\n'.join(lines)
     sys.stdout.write(output)
     if output and not output.endswith('\n'):
         sys.stdout.write('\n')
