@@ -23,23 +23,33 @@ sys.path.insert(0, '$CLAUDE_DIR/hooks')
 try:
     from config import (
         AUTOCOMPACT_THRESHOLD, THINKING_PROXY_ENABLED, THINKING_PROXY_PORT,
-        MAX_THINKING_TOKENS, OPENROUTER_API_KEY, EXTERNAL_COMPACTION_ENABLED
+        MAX_THINKING_TOKENS, OPENROUTER_API_KEY, EXTERNAL_COMPACTION_ENABLED,
+        CONTEXT_MAX_TOKENS
     )
+    # Import blocking margin with fallback for older configs
+    try:
+        from config import AUTOCOMPACT_BLOCKING_MARGIN
+    except ImportError:
+        AUTOCOMPACT_BLOCKING_MARGIN = 3  # Default 3% margin above compaction
+
     # Only use aggressive threshold if external compaction is available
     # Without OpenRouter, Claude needs its 22.5k buffer - use safer 85%
-    has_external = EXTERNAL_COMPACTION_ENABLED and OPENROUTER_API_KEY
+    has_external = bool(EXTERNAL_COMPACTION_ENABLED and OPENROUTER_API_KEY)
     threshold = AUTOCOMPACT_THRESHOLD if has_external else min(AUTOCOMPACT_THRESHOLD, 85)
+
     print(f'{threshold}')
     print(f'{THINKING_PROXY_ENABLED}')
     print(f'{THINKING_PROXY_PORT}')
     print(f'{MAX_THINKING_TOKENS}')
     print(f'{has_external}')
+    print(f'{AUTOCOMPACT_BLOCKING_MARGIN}')
 except Exception:
     print('85')
     print('True')
     print('8080')
     print('10000')
     print('False')
+    print('3')  # default margin
 " 2>/dev/null
 }
 
@@ -49,6 +59,7 @@ _CFG_PROXY_ENABLED="${_CONFIG_VALUES[1]:-True}"
 _CFG_PROXY_PORT="${_CONFIG_VALUES[2]:-8080}"
 _CFG_THINKING_TOKENS="${_CONFIG_VALUES[3]:-10000}"
 _CFG_HAS_EXTERNAL="${_CONFIG_VALUES[4]:-False}"
+_CFG_BLOCKING_MARGIN="${_CONFIG_VALUES[5]:-3}"
 COMPACT_PCT="${COMPACT_PCT:-$_CFG_THRESHOLD}"
 MAX_THINKING="${MAX_THINKING_TOKENS:-$_CFG_THINKING_TOKENS}"
 THINKING_PROXY_PORT="${THINKING_PROXY_PORT:-$_CFG_PROXY_PORT}"
@@ -63,6 +74,12 @@ if [[ "$HAS_EXTERNAL_COMPACTION" != "True" && "$COMPACT_PCT" -gt 85 ]] 2>/dev/nu
     echo "[CCM]   Values >85% may cause compaction failures. Capping at 85%." >&2
     COMPACT_PCT=85
 fi
+
+# Calculate blocking limit AFTER COMPACT_PCT is finalized (including env override and cap)
+# Blocking limit = (COMPACT_PCT + margin)% of 200k, capped at 99%
+_BLOCKING_PCT=$((COMPACT_PCT + _CFG_BLOCKING_MARGIN))
+[[ $_BLOCKING_PCT -gt 99 ]] && _BLOCKING_PCT=99
+BLOCKING_LIMIT="${BLOCKING_LIMIT:-$(( 200000 * _BLOCKING_PCT / 100 ))}"
 
 PROXY_SCRIPT="$CLAUDE_DIR/hooks/thinking-proxy.py"
 PATCHER_SCRIPT="$CLAUDE_DIR/hooks/patch-autocompact.py"
@@ -177,6 +194,15 @@ get_patched_cli() {
     return 1
 }
 
+# Repair broken session parent chains (runs quickly via cache)
+repair_sessions() {
+    local repair_script="$CLAUDE_DIR/hooks/repair-sessions.py"
+    if [[ -f "$repair_script" ]]; then
+        # Run quietly - only outputs if repairs are made
+        python3 "$repair_script" --quiet 2>/dev/null || true
+    fi
+}
+
 # Main
 main() {
     # Trap 'c d..' typo (meant to type 'cd ..')
@@ -187,12 +213,21 @@ main() {
         exec "$SHELL"
     fi
 
+    # Repair any broken session chains before launching
+    # (fast: uses hash cache to skip already-repaired sessions)
+    repair_sessions
+
     local session_id
     session_id=$(find_session_id "$@")
 
     local env_vars=(
         "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=$COMPACT_PCT"
+        "CLAUDE_CODE_BLOCKING_LIMIT_OVERRIDE=$BLOCKING_LIMIT"
         "MAX_THINKING_TOKENS=$MAX_THINKING"
+        # Disable sidechain Session Memory compaction (2.1.27+)
+        # SM_COMPACT stores summaries as sidechain entries which are filtered on resume
+        # This forces inline compaction that the proxy can intercept for external routing
+        "DISABLE_CLAUDE_CODE_SM_COMPACT=true"
     )
 
     if [[ "$THINKING_PROXY_ENABLED" == "True" ]]; then

@@ -61,6 +61,11 @@ AUTOCOMPACT_ENABLED = True
 # Default threshold (percent): triggers compaction at this % of max context
 AUTOCOMPACT_THRESHOLD = 95
 
+# Blocking margin (percent): how much ABOVE compaction threshold before blocking input
+# This provides headroom for compaction to complete before hitting hard limit.
+# Example: threshold=95, margin=3 → compaction at 95%, blocking at 98% (6k tokens buffer)
+AUTOCOMPACT_BLOCKING_MARGIN = 3
+
 # Max thinking tokens per turn. Controls API max_tokens budget.
 # Lower = more input headroom. With 10k, API input limit = 200k - 10k = 190k,
 # aligning with the 95% autocompact threshold and blocking limit patch.
@@ -251,6 +256,11 @@ THINKING_PROXY_DEBUG_LOG = False
 
 # Available skills (from ~/.claude/commands/):
 #   ccm: Context Manager (CCM) command. Parse the argument to dete...
+#   pin-end: End the current pin range started by /pin-start.
+#   pin-last: Emit a pin directive to preserve the most recent large to...
+#   pin-next: Emit a pin directive to preserve the next large tool outp...
+#   pin-start: Start a pin range - all large tool outputs until /pin-end...
+#   purge: Run the session purge tool to reduce context usage by tru...
 #   recap: Read project documentation to get up to speed on the code...
 #   relay: SSH Relay for persistent remote connections.
 
