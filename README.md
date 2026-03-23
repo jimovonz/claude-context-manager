@@ -1,10 +1,21 @@
 # Claude Context Manager
 
+> **This project is no longer maintained.**
+>
+> CCM was built when Claude Code had a 200k token context window and compaction was a constant pain point. With the introduction of 1M token contexts, the core problem CCM solved is far less pressing. Additionally, CCM relies on patching the Claude Code CLI binary (`cli.js`), which creates a significant maintenance burden as the CLI evolves — each update risks breaking the patches.
+>
+> **Last tested with:** Claude Code 2.1.25
+>
+> The code remains available for reference, but no further updates are planned. Use at your own risk with newer versions.
+
+---
+
 [![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/jimovonz/claude-context-manager)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/)
 [![Platform](https://img.shields.io/badge/platform-Linux-lightgrey.svg)](https://www.linux.org/)
 [![Claude Code](https://img.shields.io/badge/claude--code-2.1.25-purple.svg)](https://claude.ai/claude-code)
+[![Status](https://img.shields.io/badge/status-archived-red.svg)]()
 
 Hooks and tools for managing Claude Code's context window to prevent premature compaction.
 
