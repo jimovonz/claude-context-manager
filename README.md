@@ -7,6 +7,8 @@
 > **Last tested with:** Claude Code 2.1.25
 >
 > The code remains available for reference, but no further updates are planned. Use at your own risk with newer versions.
+>
+> **Looking for the hook and caching functionality?** The standalone hook components (tool output interception, content-addressable caching, filtered retrieval) have been extracted into [claude-context-hooks](https://github.com/jimovonz/claude-context-hooks) — no CLI patching required.
 
 ---
 
